@@ -337,7 +337,7 @@ export default function VotingScreen({ route, navigation }) {
           activeOpacity={0.7}
         >
           <Text style={styles.actionButtonLabel}>
-            {voting ? '⏳ Voting...' : '✕ Dislike'}
+            {voting ? ' Voting...' : '✕ Dislike'}
           </Text>
         </TouchableOpacity>
         
@@ -348,7 +348,7 @@ export default function VotingScreen({ route, navigation }) {
           activeOpacity={0.7}
         >
           <Text style={styles.actionButtonLabel}>
-            {voting ? '⏳ Voting...' : '♡ Like'}
+            {voting ? ' Voting...' : '♡ Like'}
           </Text>
         </TouchableOpacity>
       </View>

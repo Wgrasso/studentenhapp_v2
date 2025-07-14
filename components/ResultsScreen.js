@@ -65,10 +65,10 @@ export default function ResultsScreen({ route, navigation }) {
 
   const getMedalEmoji = (index) => {
     switch (index) {
-      case 0: return '🥇';
-      case 1: return '🥈';
-      case 2: return '🥉';
-      default: return '🏆';
+      case 0: return '1';
+      case 1: return '2';
+      case 2: return '3';
+      default: return '#';
     }
   };
 
@@ -246,7 +246,7 @@ export default function ResultsScreen({ route, navigation }) {
                         styles.progressFill,
                         { 
                           width: `${meal.yes_percentage || 0}%`,
-                          backgroundColor: '#4CAF50'
+                          backgroundColor: '#8B7355'
                         }
                       ]} 
                     />

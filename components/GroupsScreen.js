@@ -4,8 +4,9 @@ import Slider from '@react-native-community/slider';
 import { createGroupInSupabase, joinGroupByCode, getUserGroups, leaveGroup, deleteGroup, getGroupMembers } from '../lib/groupsService';
 import { getMealOptions } from '../lib/mealRequestService';
 import { getActiveMealRequest, createMealRequest, debugGetActiveRequests, debugCompleteAllActiveRequests, completeMealRequest, getTopVotedMeals } from '../lib/mealRequestService';
-import { getGroupMemberResponses, getAllDinnerRequests, recordUserResponse, createMealFromRequest } from '../lib/dinnerRequestService';
+import { getGroupMemberResponses, getAllDinnerRequests, recordUserResponse, createMealFromRequest, completeDinnerRequest } from '../lib/dinnerRequestService';
 import { ensureUserProfile } from '../lib/profileService';
+import { terminatedSessionsService } from '../lib/terminatedSessionsService';
 import { supabase } from '../lib/supabase';
 
 // Safe image component for floating drawings
@@ -68,7 +69,7 @@ const formatTime = (hour, minutes) => {
 };
 
 // Enhanced User response buttons component with dinner request details and timer
-const UserResponseButtons = ({ memberResponses, onResponse, dinnerRequestData, groupName }) => {
+const UserResponseButtons = ({ memberResponses, onResponse, dinnerRequestData, groupName, onLocalAccept }) => {
   const [currentUserId, setCurrentUserId] = useState(null);
   const [timeRemaining, setTimeRemaining] = useState('');
   const [timerAnimation] = useState(new Animated.Value(1));
@@ -224,6 +225,10 @@ const UserResponseButtons = ({ memberResponses, onResponse, dinnerRequestData, g
         <TouchableOpacity 
           style={[styles.responseButton, styles.acceptButton]}
           onPress={() => {
+            // INSTANT UI UPDATE: Show voting buttons immediately
+            if (onLocalAccept) {
+              onLocalAccept();
+            }
             // Immediately update local state for instant UI feedback
             setHasLocallyResponded(true);
             setUserLocalResponse('accepted');
@@ -290,7 +295,7 @@ export default function GroupsScreen({ route, navigation }) {
   
   const withCooldown = (callback) => {
     if (buttonCooldown) {
-      console.log('🛡️ Button press blocked - cooldown active');
+      console.log('Button press blocked - cooldown active');
       return;
     }
     
@@ -323,8 +328,11 @@ export default function GroupsScreen({ route, navigation }) {
   const [confirmAction, setConfirmAction] = useState(() => () => {});
   const [currentUserId, setCurrentUserId] = useState(null);
   
-  // State for storing terminated session results (top 3 meals)
-  const [terminatedSessionResults, setTerminatedSessionResults] = useState(null);
+  // State for storing terminated session results (top 3 meals) - persistent per group
+  const [terminatedSessionResults, setTerminatedSessionResults] = useState(new Map()); // groupId -> results
+  
+  // Local state for instant button display when user clicks YES (optimistic UI)
+  const [userLocallyAcceptedRequest, setUserLocallyAcceptedRequest] = useState(false);
 
     // Main effect - handles initial load and user changes
   useEffect(() => {
@@ -391,7 +399,27 @@ export default function GroupsScreen({ route, navigation }) {
       // Clear the parameter to prevent repeated refreshes
       navigation.setParams({ refreshGroups: undefined });
     }
-  }, [route.params?.refreshGroups, isGuest, navigation]);
+    
+    // Clear terminated results when new request is made for a group
+    if (route.params?.clearTerminatedResults) {
+      const groupId = route.params.clearTerminatedResults;
+      console.log('🧹 Clearing terminated results for group:', groupId);
+      setTerminatedSessionResults(prev => {
+        const newMap = new Map(prev);
+        newMap.delete(groupId);
+        return newMap;
+      });
+      
+      // Reset local acceptance state when new request is made for this group
+      if (selectedGroup && selectedGroup.group_id === groupId) {
+        console.log('🔄 Resetting local acceptance state for new request');
+        setUserLocallyAcceptedRequest(false);
+      }
+      
+      // Clear the parameter to prevent repeated clearing
+      navigation.setParams({ clearTerminatedResults: undefined });
+    }
+  }, [route.params?.refreshGroups, route.params?.clearTerminatedResults, isGuest, navigation]);
 
   // Listen for immediate response updates from MainProfileScreen  
   useEffect(() => {
@@ -471,6 +499,34 @@ export default function GroupsScreen({ route, navigation }) {
     };
   }, []);
 
+  // Load terminated sessions from database
+  const loadTerminatedSessions = async () => {
+    try {
+      console.log('🔄 Loading terminated sessions from database...');
+      const newMap = new Map();
+      
+      // Load terminated sessions for all groups
+      for (const group of groups) {
+        const sessionResult = await terminatedSessionsService.getTerminatedSession(group.group_id);
+        
+        if (sessionResult.success && sessionResult.data) {
+          newMap.set(group.group_id, {
+            groupId: sessionResult.data.group_id,
+            groupName: sessionResult.data.group_name,
+            results: sessionResult.data.top_results || [],
+            memberResponses: sessionResult.data.member_responses || [],
+            terminatedAt: sessionResult.data.terminated_at
+          });
+        }
+      }
+      
+      setTerminatedSessionResults(newMap);
+      console.log('✅ Loaded terminated sessions from database:', newMap);
+    } catch (error) {
+      console.error('❌ Error loading terminated sessions:', error);
+    }
+  };
+
   const loadUserGroups = async () => {
     if (isGuest) {
       // Don't try to load groups for guest users
@@ -543,15 +599,36 @@ export default function GroupsScreen({ route, navigation }) {
                 console.log(`📋 [DEBUG] - Meal request details:`, mealRequestResult.request);
               }
               
+                          // Check if this group has a terminated session that should be preserved
+            const existingGroup = groups.find(g => g.group_id === group.group_id);
+            const wasTerminated = existingGroup?._terminatedSession;
+            const terminatedRecently = wasTerminated && existingGroup?._terminatedAt && 
+              (new Date() - new Date(existingGroup._terminatedAt)) < 300000; // Within 5 minutes
+            
+            if (terminatedRecently) {
+              console.log(`🛡️ Preserving terminated state for group: ${group.group_name}`);
               return {
                 ...group,
-                hasActiveMealRequest: hasActiveMeal,
-                activeMealRequest: mealRequestResult.success ? mealRequestResult.request : null,
-                hasActiveDinnerRequest: hasActiveDinner,
-                activeDinnerRequest: dinnerRequestResult.success && dinnerRequestResult.hasActiveRequest ? dinnerRequestResult.activeRequest : null,
-                dinnerRequestResponses: dinnerRequestResult.success ? dinnerRequestResult.memberResponses : [],
-                dinnerRequestSummary: dinnerRequestResult.success ? dinnerRequestResult.summary : null
+                hasActiveMealRequest: false,
+                activeMealRequest: null,
+                hasActiveDinnerRequest: false,
+                activeDinnerRequest: null,
+                dinnerRequestResponses: [],
+                dinnerRequestSummary: null,
+                _terminatedSession: true,
+                _terminatedAt: existingGroup._terminatedAt
               };
+            }
+            
+            return {
+              ...group,
+              hasActiveMealRequest: hasActiveMeal,
+              activeMealRequest: mealRequestResult.success ? mealRequestResult.request : null,
+              hasActiveDinnerRequest: hasActiveDinner,
+              activeDinnerRequest: dinnerRequestResult.success && dinnerRequestResult.hasActiveRequest ? dinnerRequestResult.activeRequest : null,
+              dinnerRequestResponses: dinnerRequestResult.success ? dinnerRequestResult.memberResponses : [],
+              dinnerRequestSummary: dinnerRequestResult.success ? dinnerRequestResult.summary : null
+            };
             } catch (error) {
               console.log(`⚠️ Failed to check requests for group ${group.group_id}:`, error);
               console.error('❌ Detailed error:', error);
@@ -577,6 +654,11 @@ export default function GroupsScreen({ route, navigation }) {
           console.log(`- ${group.group_name}: ${JSON.stringify(group.dinnerRequestSummary)}`);
         });
         setGroups(groupsWithMealRequests);
+        
+        // Load terminated sessions after groups are loaded
+        setTimeout(() => {
+          loadTerminatedSessions();
+        }, 100); // Small delay to ensure groups state is updated
       } else {
         // Don't show error popup - just log and handle gracefully
         console.log('ℹ️ Could not load groups:', result?.error || 'Unknown error');
@@ -926,6 +1008,13 @@ export default function GroupsScreen({ route, navigation }) {
           console.log('⚠️ Groups refresh failed (non-critical):', refreshError);
         });
         
+        // Refresh MainProfileScreen groups immediately
+        if (navigation.getParent()) {
+          navigation.getParent().setParams({ 
+            refreshMainProfileGroups: Date.now()
+          });
+        }
+        
         // Show success message
         setTimeout(() => {
           try {
@@ -1128,6 +1217,13 @@ export default function GroupsScreen({ route, navigation }) {
         loadUserGroups().catch(refreshError => {
           console.log('⚠️ Groups refresh failed (non-critical):', refreshError);
         });
+        
+        // Refresh MainProfileScreen groups immediately
+        if (navigation.getParent()) {
+          navigation.getParent().setParams({ 
+            refreshMainProfileGroups: Date.now()
+          });
+        }
         
         // Show brief success message that auto-dismisses
         setTimeout(() => {
@@ -1372,6 +1468,9 @@ export default function GroupsScreen({ route, navigation }) {
     setSelectedGroup(cleanGroup);
     setShowGroupDetailModal(true);
     
+    // Reset local acceptance state when opening a different group
+    setUserLocallyAcceptedRequest(false);
+    
     Animated.spring(groupDetailAnimation, {
       toValue: 1,
       useNativeDriver: true,
@@ -1392,8 +1491,7 @@ export default function GroupsScreen({ route, navigation }) {
       setMembersError(null);
       setMemberResponses([]);
       setDinnerRequestStatus(null);
-      // Clear terminated session results when closing modal
-      setTerminatedSessionResults(null);
+      // NOTE: Don't clear terminated session results - they should persist!
       
       Animated.spring(groupDetailAnimation, {
         toValue: 0,
@@ -1525,9 +1623,9 @@ export default function GroupsScreen({ route, navigation }) {
   const getResponseIndicatorStyle = (status) => {
     switch (status) {
       case 'accepted':
-        return { backgroundColor: '#4CAF50', color: '#FFFFFF' };
+        return { backgroundColor: '#8B7355', color: '#FFFFFF' };
       case 'declined':
-        return { backgroundColor: '#F44336', color: '#FFFFFF' };
+        return { backgroundColor: '#6B6B6B', color: '#FFFFFF' };
       case 'pending':
         return { backgroundColor: '#FFC107', color: '#2D2D2D' };
       default:
@@ -1905,92 +2003,166 @@ export default function GroupsScreen({ route, navigation }) {
     // SIMPLIFIED: Just show the confirmation dialog directly
     showConfirmDialog(
       'Terminate Voting Session',
-      'Are you sure you want to terminate this voting session? This will stop all voting and clear all recorded votes. This action cannot be undone.',
+      'Are you sure you want to terminate this voting session? This will stop all voting and show the final results. This action cannot be undone.',
       'Terminate',
       async () => {
         console.log('🛑 User confirmed termination for request ID:', requestId);
         setMealRequestLoading(true);
         
         try {
-          // FIRST: Get top 3 voted meals before terminating the session
+          // STEP 1: Get top 3 voted meals before terminating the session
           console.log('🏆 Getting top 3 results before termination...');
           const topResultsResponse = await getTopVotedMeals(requestId);
           
           let topResults = null;
-          if (topResultsResponse.success && topResultsResponse.topMeals) {
+          if (topResultsResponse.success && topResultsResponse.topMeals && topResultsResponse.topMeals.length > 0) {
             topResults = topResultsResponse.topMeals.slice(0, 3); // Ensure we only get top 3
-            console.log('✅ Retrieved top 3 results:', topResults);
+            console.log('✅ Successfully retrieved top 3 results:', topResults);
           } else {
             console.warn('⚠️ Could not get top results:', topResultsResponse.error);
-          }
-          
-          // SECOND: Terminate the session
-          const result = await completeMealRequest(requestId);
-          console.log('🛑 Termination result:', result);
-          
-          if (result.success) {
-            console.log('✅ Session terminated successfully');
+            console.warn('⚠️ Response structure:', topResultsResponse);
             
-            // THIRD: Store the top 3 results for this group
-            if (topResults && topResults.length > 0) {
-              setTerminatedSessionResults({
-                groupId: selectedGroup.group_id,
-                groupName: selectedGroup.group_name,
-                results: topResults,
-                terminatedAt: new Date().toISOString()
-              });
-              console.log('📊 Stored top 3 results for display');
-            }
+            // Try alternative approach - get voting results directly
+            console.log('🔄 Attempting to get voting results as fallback...');
+            const { getVotingResults } = require('../lib/mealRequestService');
+            const votingResultsResponse = await getVotingResults(requestId);
             
-            // FOURTH: Update selectedGroup state to remove highlights and voting session IMMEDIATELY
-            if (selectedGroup) {
-              console.log('🔄 Removing dinner request highlight and voting session from selectedGroup');
-              setSelectedGroup(prev => ({
-                ...prev,
-                hasActiveDinnerRequest: false,
-                hasActiveMealRequest: false,
-                activeDinnerRequest: null,
-                activeMealRequest: null,
-                dinnerRequestResponses: [],
-                // Mark as terminated to prevent any background updates from overriding
-                _terminatedSession: true
-              }));
-            }
-            
-            // FIFTH: Refresh groups to remove highlight from group list (but don't override our immediate changes)
-            setTimeout(() => {
-              loadUserGroups();
-            }, 100);
-            
-            // Show success message with results info
-            const successMessage = topResults && topResults.length > 0 
-              ? `Voting session ended. Top ${topResults.length} results are shown below.`
-              : 'Voting session ended. Group reverted to normal.';
+            if (votingResultsResponse.success && votingResultsResponse.results && votingResultsResponse.results.length > 0) {
+              // Sort by yes votes and take top 3
+              const sortedResults = votingResultsResponse.results
+                .sort((a, b) => (b.yes_votes || 0) - (a.yes_votes || 0))
+                .slice(0, 3);
               
-            showAlert(
-              'Session Terminated',
-              successMessage,
-              'OK'
-            );
-            
-            // Auto-hide after 2 seconds
-            setTimeout(() => {
-              hideAlert();
-            }, 2000);
-            
-          } else {
-            console.log('❌ Termination failed:', result.error);
-            showAlert(
-              'Termination Failed',
-              result.error || 'Failed to terminate the voting session.',
-              'OK'
-            );
+              topResults = sortedResults;
+              console.log('✅ Retrieved top 3 results from voting results fallback:', topResults);
+            } else {
+              console.warn('⚠️ Could not get voting results either:', votingResultsResponse.error);
+            }
           }
+          
+          // Get final member responses (who is eating and who isn't)
+          const finalMemberResponses = selectedGroup.dinnerRequestResponses || [];
+          
+          // STEP 2: Save terminated session to permanent storage
+          console.log('💾 Saving terminated session to database...');
+          const saveResult = await terminatedSessionsService.saveTerminatedSession(
+            selectedGroup.group_id,
+            selectedGroup.group_name,
+            topResults && topResults.length > 0 ? topResults : [],
+            finalMemberResponses
+          );
+          
+          if (!saveResult.success) {
+            console.error('❌ Failed to save terminated session:', saveResult.error);
+            showAlert(
+              'Save Error',
+              'Failed to save session results. Please try again.',
+              'OK'
+            );
+            setMealRequestLoading(false);
+            return;
+          }
+          
+          // STEP 3: Clean up all active session data
+          console.log('🧹 Cleaning up all active session data...');
+          const cleanupResult = await terminatedSessionsService.cleanupActiveSession(selectedGroup.group_id);
+          
+          if (!cleanupResult.success && !cleanupResult.partialSuccess) {
+            console.warn('⚠️ Failed to cleanup active session:', cleanupResult.error);
+            // Continue anyway - the session is still saved and terminated
+          } else if (cleanupResult.partialSuccess) {
+            console.warn('⚠️ Partial cleanup success:', cleanupResult.error);
+            // Continue anyway - most cleanup was successful
+          }
+          
+          console.log('✅ Session terminated and saved successfully');
+          
+          // STEP 4: COMPLETELY CLEAR all request information from local state
+          if (selectedGroup) {
+            console.log('🧹 Completely clearing all request information from selectedGroup');
+            setSelectedGroup(prev => ({
+              ...prev,
+              hasActiveDinnerRequest: false,
+              hasActiveMealRequest: false,
+              activeDinnerRequest: null,
+              activeMealRequest: null,
+              dinnerRequestResponses: [],
+              dinnerRequestSummary: null,
+              // Mark as terminated to prevent any background updates from overriding
+              _terminatedSession: true,
+              _terminatedAt: new Date().toISOString()
+            }));
+            
+            // Reset local acceptance state when session is terminated
+            setUserLocallyAcceptedRequest(false);
+          }
+          
+          // STEP 5: COMPLETELY CLEAR all request information from groups list
+          console.log('🧹 Completely clearing all request information from groups list...');
+          setGroups(prevGroups => {
+            const updatedGroups = prevGroups.map(group => {
+              if (group.group_id === selectedGroup.group_id) {
+                console.log('🧹 Completely clearing request info from group:', group.group_name);
+                return {
+                  ...group,
+                  hasActiveDinnerRequest: false,
+                  hasActiveMealRequest: false,
+                  activeDinnerRequest: null,
+                  activeMealRequest: null,
+                  dinnerRequestResponses: [],
+                  dinnerRequestSummary: null,
+                  // Mark as terminated to prevent background refresh from overriding
+                  _terminatedSession: true,
+                  _terminatedAt: new Date().toISOString()
+                };
+              }
+              return group;
+            });
+            console.log('✅ Completely cleared all request information from groups');
+            return updatedGroups;
+          });
+          
+          // STEP 6: Update local terminated sessions state for immediate display
+          setTerminatedSessionResults(prev => {
+            const newMap = new Map(prev);
+            newMap.set(selectedGroup.group_id, {
+              groupId: selectedGroup.group_id,
+              groupName: selectedGroup.group_name,
+              results: topResults && topResults.length > 0 ? topResults : [],
+              memberResponses: finalMemberResponses,
+              terminatedAt: new Date().toISOString()
+            });
+            return newMap;
+          });
+          
+          // STEP 7: Wait longer before server refresh to ensure database updates complete
+          setTimeout(() => {
+            console.log('🔄 Performing delayed server refresh...');
+            loadUserGroups();
+          }, 3000); // Increased delay to allow database updates to complete
+          
+          // Show success message with results info
+          const resultsCount = topResults ? topResults.length : 0;
+          const successMessage = resultsCount > 0 
+            ? `Voting session terminated! Top ${resultsCount} results are displayed below.`
+            : 'Voting session terminated. No votes were recorded.';
+            
+          showAlert(
+            'Session Terminated',
+            successMessage,
+            'OK'
+          );
+          
+          // Auto-hide alert after 3 seconds
+          setTimeout(() => {
+            hideAlert();
+          }, 3000);
+          
         } catch (error) {
           console.error('❌ Error terminating session:', error);
           showAlert(
-            'Error',
-            'An unexpected error occurred while terminating the session.',
+            'Termination Error',
+            'An unexpected error occurred while terminating the session. Please try again.',
             'OK'
           );
         } finally {
@@ -2505,31 +2677,35 @@ export default function GroupsScreen({ route, navigation }) {
                         onResponse={handleDinnerRequestResponse}
                         dinnerRequestData={selectedGroup.activeDinnerRequest}
                         groupName={selectedGroup.group_name}
+                        onLocalAccept={() => {
+                          console.log('🚀 [INSTANT] User clicked YES - showing voting buttons immediately');
+                          setUserLocallyAcceptedRequest(true);
+                        }}
                       />
 
                     </View>
                   )}
 
-                  {/* Action Buttons - Only for users who accepted the dinner request */}
+                  {/* Action Buttons - Show INSTANTLY when user clicks YES (optimistic UI) */}
                   {(() => {
                     console.log('📋 [RENDER DEBUG] Checking voting buttons for:', selectedGroup?.group_name);
-                    console.log('📋 [RENDER DEBUG] hasActiveMealRequest:', selectedGroup?.hasActiveMealRequest);
-                    console.log('📋 [RENDER DEBUG] activeMealRequest:', selectedGroup?.activeMealRequest);
-                    console.log('📋 [RENDER DEBUG] currentUserId:', currentUserId);
-                    console.log('📋 [RENDER DEBUG] dinnerRequestResponses:', selectedGroup?.dinnerRequestResponses);
-                    console.log('📋 [RENDER DEBUG] hasActiveDinnerRequest:', selectedGroup?.hasActiveDinnerRequest);
                     
-                    // Only show voting buttons if:
-                    // 1. There's an active meal request AND
-                    // 2. Current user has accepted the dinner request
-                    const hasActiveMeal = selectedGroup.hasActiveMealRequest;
-                    const userAcceptedRequest = currentUserAcceptedDinnerRequest();
+                    // INSTANT BUTTON DISPLAY: Show buttons immediately if user clicked YES locally
+                    const userLocallyAccepted = userLocallyAcceptedRequest;
+                    const userAcceptedRequest = currentUserAcceptedDinnerRequest(); // Supabase check (backup)
+                    const hasActiveDinnerRequest = selectedGroup?.hasActiveDinnerRequest;
                     
-                    console.log('📋 [RENDER DEBUG] hasActiveMeal:', hasActiveMeal);
+                    // Show buttons if:
+                    // 1. User clicked YES locally (instant) OR confirmed via Supabase (backup) AND
+                    // 2. There's still an active dinner request (meal session exists since request creation)
+                    const shouldShowButtons = (userLocallyAccepted || userAcceptedRequest) && hasActiveDinnerRequest;
+                    
+                    console.log('📋 [RENDER DEBUG] userLocallyAccepted:', userLocallyAccepted);
                     console.log('📋 [RENDER DEBUG] userAcceptedRequest:', userAcceptedRequest);
-                    console.log('📋 [RENDER DEBUG] FINAL RESULT:', hasActiveMeal && userAcceptedRequest);
+                    console.log('📋 [RENDER DEBUG] hasActiveDinnerRequest:', hasActiveDinnerRequest);
+                    console.log('📋 [RENDER DEBUG] FINAL RESULT:', shouldShowButtons);
                     
-                    return hasActiveMeal && userAcceptedRequest;
+                    return shouldShowButtons;
                   })() && (
                     <View style={styles.groupModalActions}>
                       <Text style={styles.activeSectionTitle}>Active Voting Session</Text>
@@ -2626,6 +2802,8 @@ export default function GroupsScreen({ route, navigation }) {
                     </View>
                   )}
 
+
+
                   {/* Members Section */}
                   <View style={styles.groupModalDescription}>
                     <Text style={styles.groupModalSectionTitle}>Members</Text>
@@ -2688,47 +2866,157 @@ export default function GroupsScreen({ route, navigation }) {
                       </>
                     )}
 
-                    {/* Terminated Session Results - Show Top 3 Meals */}
-                    {terminatedSessionResults && terminatedSessionResults.groupId === selectedGroup.group_id && (
-                      <View style={styles.terminatedResultsSection}>
-                        <Text style={styles.terminatedResultsTitle}>🏆 Final Results</Text>
-                        <Text style={styles.terminatedResultsSubtitle}>
-                          Top {terminatedSessionResults.results.length} voted meals from the session
-                        </Text>
-                        
-                        {terminatedSessionResults.results.map((meal, index) => (
-                          <View key={index} style={styles.resultMealItem}>
-                            <View style={styles.resultMealRank}>
-                              <Text style={styles.resultMealRankText}>#{index + 1}</Text>
+                    {/* Terminated Session Results - Show Top 3 Meals + Member Responses */}
+                    {(() => {
+                      const groupResults = terminatedSessionResults.get(selectedGroup.group_id);
+                      console.log('🔍 [RESULTS DEBUG] Group ID:', selectedGroup.group_id);
+                      console.log('🔍 [RESULTS DEBUG] Terminated results map:', terminatedSessionResults);
+                      console.log('🔍 [RESULTS DEBUG] Group results:', groupResults);
+                      
+                      return groupResults && (
+                        <View style={styles.terminatedResultsSection}>
+                          <Text style={styles.terminatedResultsTitle}>Final Results</Text>
+                          
+                          {/* Member Responses Section */}
+                          {groupResults.memberResponses && groupResults.memberResponses.length > 0 && (
+                            <View style={styles.memberResponsesSection}>
+                              <Text style={styles.memberResponsesTitle}>Who's Eating</Text>
+                              <View style={styles.memberResponsesGrid}>
+                                {groupResults.memberResponses.map((response, index) => {
+                                  const member = members.find(m => m.user_id === response.userId);
+                                  const memberName = member?.user_name || member?.full_name || 'Unknown';
+                                  const isEating = response.response === 'accepted';
+                                  
+                                  return (
+                                    <View key={index} style={[
+                                      styles.memberResponseItem,
+                                      isEating ? styles.memberResponseEating : styles.memberResponseNotEating
+                                    ]}>
+                                      <Text style={[
+                                        styles.memberResponseName,
+                                        isEating ? styles.memberResponseEatingText : styles.memberResponseNotEatingText
+                                      ]}>
+                                        {memberName}
+                                      </Text>
+                                      <Text style={[
+                                        styles.memberResponseStatus,
+                                        isEating ? styles.memberResponseEatingText : styles.memberResponseNotEatingText
+                                      ]}>
+                                        {isEating ? 'Eating' : 'Not eating'}
+                                      </Text>
+                                    </View>
+                                  );
+                                })}
+                              </View>
                             </View>
-                            
-                            <View style={styles.resultMealContent}>
-                              <Text style={styles.resultMealName} numberOfLines={2}>
-                                {meal.meal_data?.name || meal.name || 'Unnamed Recipe'}
-                              </Text>
-                              <Text style={styles.resultMealVotes}>
-                                ✅ {meal.yes_votes || 0} votes • ❌ {meal.no_votes || 0} votes
-                              </Text>
-                              {meal.meal_data?.description && (
-                                <Text style={styles.resultMealDescription} numberOfLines={2}>
-                                  {meal.meal_data.description}
-                                </Text>
-                              )}
+                          )}
+                          
+                          {/* Top 3 Meals Section */}
+                          {groupResults.results && groupResults.results.length > 0 && (
+                            <View style={styles.topMealsSection}>
+                              <Text style={styles.topMealsTitle}>Top {groupResults.results.length} Voted Meals</Text>
+                              
+                              {groupResults.results.map((meal, index) => {
+                                console.log(`🔍 [RESULTS DEBUG] Meal ${index + 1}:`, meal);
+                                return (
+                                  <View key={index} style={styles.resultMealItem}>
+                                    <View style={styles.resultMealRank}>
+                                      <Text style={styles.resultMealRankText}>#{index + 1}</Text>
+                                    </View>
+                                    
+                                    <View style={styles.resultMealContent}>
+                                      <Text style={styles.resultMealName} numberOfLines={2}>
+                                        {meal.meal_data?.name || meal.name || 'Unnamed Recipe'}
+                                      </Text>
+                                      <Text style={styles.resultMealVotes}>
+                                        {meal.yes_votes || 0} yes • {meal.no_votes || 0} no
+                                      </Text>
+                                      {(meal.meal_data?.description || meal.description) && (
+                                        <Text style={styles.resultMealDescription} numberOfLines={2}>
+                                          {meal.meal_data?.description || meal.description}
+                                        </Text>
+                                      )}
+                                    </View>
+                                  </View>
+                                );
+                              })}
                             </View>
-                          </View>
-                        ))}
-                        
-                        <TouchableOpacity 
-                          style={styles.clearResultsButton}
-                          onPress={() => setTerminatedSessionResults(null)}
-                        >
-                          <Text style={styles.clearResultsButtonText}>Clear Results</Text>
-                        </TouchableOpacity>
-                      </View>
-                    )}
+                          )}
+                          
+                          <TouchableOpacity 
+                            style={styles.clearResultsButton}
+                            onPress={async () => {
+                              console.log('🧹 Clearing all results for group:', selectedGroup.group_name);
+                              
+                              // Clear from database
+                              const clearResult = await terminatedSessionsService.clearTerminatedSession(selectedGroup.group_id);
+                              
+                              if (clearResult.success) {
+                                // Clear from local state
+                                setTerminatedSessionResults(prev => {
+                                  const newMap = new Map(prev);
+                                  newMap.delete(selectedGroup.group_id);
+                                  return newMap;
+                                });
+                                
+                                console.log('✅ Successfully cleared results for group:', selectedGroup.group_name);
+                              } else {
+                                console.error('❌ Failed to clear results:', clearResult.error);
+                                showAlert(
+                                  'Clear Error',
+                                  'Failed to clear results. Please try again.',
+                                  'OK'
+                                );
+                              }
+                            }}
+                          >
+                            <Text style={styles.clearResultsButtonText}>Clear Results</Text>
+                          </TouchableOpacity>
+                        </View>
+                      );
+                    })()}
                   </View>
                 </View>
               )}
+
+              {/* Request Meal Button - Only show when no active voting session - BOTTOM OF MODAL */}
+              {(() => {
+                const hasActiveDinnerRequest = selectedGroup?.hasActiveDinnerRequest;
+                const hasActiveMealRequest = selectedGroup?.hasActiveMealRequest;
+                const showRequestMealButton = !hasActiveDinnerRequest && !hasActiveMealRequest;
+                
+                return showRequestMealButton && (
+                  <View style={styles.requestMealSection}>
+                    <TouchableOpacity 
+                      style={styles.requestMealButtonNew}
+                      onPress={() => {
+                        console.log('📍 Request Meal button pressed for group:', selectedGroup.group_name);
+                        console.log('📍 Navigating to MainProfileScreen with pre-selected group');
+                        
+                        // Close the modal
+                        hideGroupDetailModal();
+                        
+                        // Navigate to MainProfileScreen with the group pre-selected
+                        // Use the enhanced navigation from MainTabNavigator
+                        if (navigation && navigation.navigate) {
+                          // Navigate to profile tab with pre-selected group
+                          navigation.navigate('Profile', {
+                            preSelectedGroup: {
+                              group_id: selectedGroup.group_id,
+                              group_name: selectedGroup.group_name,
+                              member_count: selectedGroup.member_count
+                            }
+                          });
+                        } else {
+                          console.log('💡 Navigation not available, please navigate to Profile tab manually');
+                        }
+                      }}
+                    >
+                      <Text style={styles.requestMealButtonTextNew}>Request Meal</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              })()}
             </ScrollView>
               </Animated.View>
 
@@ -3916,12 +4204,12 @@ const styles = StyleSheet.create({
   },
   
   revealButtonNew: {
-    backgroundColor: '#FFD700',
+    backgroundColor: '#8B7355',
     borderRadius: 12,
     paddingHorizontal: 36,
     paddingVertical: 16,
     marginBottom: 12,
-    shadowColor: '#FFD700',
+    shadowColor: '#8B7355',
     shadowOffset: {
       width: 0,
       height: 3,
@@ -3935,7 +4223,7 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter_500Medium',
     fontSize: 16,
     lineHeight: 20,
-    color: '#2D2D2D',
+    color: '#FEFEFE',
     letterSpacing: 0.3,
     textAlign: 'center',
   },
@@ -4326,10 +4614,10 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   acceptButton: {
-    backgroundColor: '#4CAF50',
+    backgroundColor: '#8B7355',
   },
   declineButton: {
-    backgroundColor: '#F44336',
+    backgroundColor: '#6B6B6B',
   },
   acceptButtonText: {
     fontFamily: 'Inter_600SemiBold',
@@ -4443,7 +4731,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: '#4CAF50',
+    backgroundColor: '#8B7355',
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 16,
@@ -4470,7 +4758,7 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter_500Medium',
     fontSize: 14,
     lineHeight: 18,
-    color: '#4CAF50',
+    color: '#8B7355',
     marginBottom: 4,
     letterSpacing: 0.1,
   },
@@ -4497,6 +4785,115 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     color: '#6B6B6B',
     letterSpacing: 0.1,
+  },
+
+  // Member Responses Section Styles
+  memberResponsesSection: {
+    marginBottom: 20,
+    backgroundColor: 'rgba(139, 115, 85, 0.05)',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(139, 115, 85, 0.2)',
+  },
+  memberResponsesTitle: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 16,
+    lineHeight: 22,
+    color: '#2D2D2D',
+    marginBottom: 12,
+    textAlign: 'center',
+    letterSpacing: 0.2,
+  },
+  memberResponsesGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  memberResponseItem: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    alignItems: 'center',
+    borderWidth: 1,
+    marginBottom: 8,
+  },
+  memberResponseEating: {
+    backgroundColor: 'rgba(139, 115, 85, 0.1)',
+    borderColor: '#8B7355',
+  },
+  memberResponseNotEating: {
+    backgroundColor: 'rgba(107, 107, 107, 0.1)',
+    borderColor: '#6B6B6B',
+  },
+  memberResponseName: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 14,
+    lineHeight: 18,
+    letterSpacing: 0.1,
+    textAlign: 'center',
+  },
+  memberResponseEatingText: {
+    color: '#8B7355',
+  },
+  memberResponseNotEatingText: {
+    color: '#6B6B6B',
+  },
+  memberResponseStatus: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 12,
+    lineHeight: 16,
+    letterSpacing: 0.1,
+    textAlign: 'center',
+    marginTop: 2,
+  },
+  
+  // Top Meals Section Styles
+  topMealsSection: {
+    marginBottom: 20,
+  },
+  topMealsTitle: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 16,
+    lineHeight: 22,
+    color: '#2D2D2D',
+    marginBottom: 12,
+    textAlign: 'center',
+    letterSpacing: 0.2,
+  },
+
+  // Request Meal Section Styles
+  requestMealSection: {
+    marginTop: 24,
+    marginBottom: 20,
+    alignItems: 'center',
+    paddingVertical: 16,
+    backgroundColor: 'rgba(139, 115, 85, 0.05)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(139, 115, 85, 0.2)',
+  },
+  requestMealButtonNew: {
+    backgroundColor: '#8B7355',
+    borderRadius: 12,
+    paddingHorizontal: 32,
+    paddingVertical: 16,
+    shadowColor: '#8B7355',
+    shadowOffset: {
+      width: 0,
+      height: 3,
+    },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  requestMealButtonTextNew: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 16,
+    lineHeight: 20,
+    color: '#FEFEFE',
+    letterSpacing: 0.3,
+    textAlign: 'center',
   },
  
 }); 

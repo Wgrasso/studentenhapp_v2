@@ -93,6 +93,26 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
     }
   }, [route.params?.immediateResponseFromGroup, currentRequests, currentRequestIndex, navigation]);
 
+  // Listen for group creation/update events to refresh group list
+  useEffect(() => {
+    if (route.params?.refreshMainProfileGroups && !isGuest) {
+      console.log('🔄 [CROSS-SCREEN] Refreshing MainProfile groups due to group creation/update');
+      loadUserGroups();
+      // Clear the parameter to prevent repeated refreshes
+      navigation.setParams({ refreshMainProfileGroups: undefined });
+    }
+  }, [route.params?.refreshMainProfileGroups, isGuest, navigation]);
+
+  // Listen for preSelectedGroup parameter to auto-fill group selection
+  useEffect(() => {
+    if (route.params?.preSelectedGroup && !isGuest) {
+      console.log('📍 [CROSS-SCREEN] Auto-selecting group from GroupsScreen:', route.params.preSelectedGroup.group_name);
+      setSelectedGroup(route.params.preSelectedGroup);
+      // Clear the parameter to prevent repeated selections
+      navigation.setParams({ preSelectedGroup: undefined });
+    }
+  }, [route.params?.preSelectedGroup, isGuest, navigation]);
+
   const loadCurrentUserId = async () => {
     try {
       const { data: { user }, error } = await supabase.auth.getUser();
@@ -585,7 +605,10 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
         
         // Trigger refresh of groups data when navigating back
         if (navigation.getParent()) {
-          navigation.getParent().setParams({ refreshGroups: Date.now() });
+          navigation.getParent().setParams({ 
+            refreshGroups: Date.now(),
+            clearTerminatedResults: selectedGroup.group_id // Clear previous results for this group
+          });
         }
         
         // Reset selections
@@ -1666,10 +1689,10 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   acceptButton: {
-    backgroundColor: '#4CAF50',
+    backgroundColor: '#8B7355',
   },
   declineButton: {
-    backgroundColor: '#F44336',
+    backgroundColor: '#6B6B6B',
   },
   acceptButtonText: {
     fontFamily: 'Inter_600SemiBold',

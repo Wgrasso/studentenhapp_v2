@@ -1,0 +1,1130 @@
+import React, { useState, useEffect } from 'react';
+import { StyleSheet, Text, View, SafeAreaView, ScrollView, TouchableOpacity, Image, Linking, ActivityIndicator, Modal, Animated, Dimensions, Alert } from 'react-native';
+import { supabase } from '../lib/supabase';
+
+// Safe image component that handles missing drawings gracefully
+const SafeDrawing = ({ source, style, resizeMode = "contain" }) => {
+  const [imageError, setImageError] = useState(false);
+  
+  if (imageError) return null;
+  
+  return (
+    <Image 
+      source={source}
+      style={style}
+      resizeMode={resizeMode}
+      onError={() => setImageError(true)}
+    />
+  );
+};
+
+export default function IdeasScreen({ route, navigation, hideBottomNav }) {
+  const { isGuest } = route.params || { isGuest: true };
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [recipes, setRecipes] = useState([]);
+  const [allLoadedRecipes, setAllLoadedRecipes] = useState([]); // Store all 100 recipes
+  const [displayedCount, setDisplayedCount] = useState(20); // How many we're currently showing
+  const [isInitialized, setIsInitialized] = useState(false); // Track if data has been loaded
+  const [userPreferences, setUserPreferences] = useState({
+    cuisines: [],
+    dietaryRestrictions: []
+  });
+  
+  // Modal states
+  const [selectedRecipe, setSelectedRecipe] = useState(null);
+  const [modalVisible, setModalVisible] = useState(false);
+  const [modalAnimation] = useState(new Animated.Value(0));
+
+  const { width, height } = Dimensions.get('window');
+
+  useEffect(() => {
+    const initializeData = async () => {
+      if (!isInitialized) {
+        await loadUserPreferences();
+        
+        // Try to get preloaded meals first
+        const { getPreloadedInspirationMeals } = require('../lib/mealPreloadService');
+        const preloadedMeals = getPreloadedInspirationMeals();
+        
+        if (preloadedMeals && preloadedMeals.length > 0) {
+          console.log('✅ Using preloaded meals for inspiration page');
+          // Transform and use preloaded meals
+          const transformedRecipes = transformMealsToRecipes(preloadedMeals);
+          setAllLoadedRecipes(transformedRecipes);
+          setRecipes(transformedRecipes.slice(0, 20));
+          setDisplayedCount(20);
+          setLoading(false);
+          setIsInitialized(true);
+        } else {
+          console.log('⚠️ No preloaded meals available, fetching new meals...');
+          await loadFeaturedRecipes();
+          setIsInitialized(true);
+        }
+      } else {
+        // Just refresh user preferences if already initialized
+        await loadUserPreferences();
+      }
+    };
+    
+    initializeData();
+  }, [isGuest, isInitialized]);
+
+  const loadUserPreferences = async () => {
+    if (isGuest) {
+      return;
+    }
+    
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        return;
+      }
+
+      // Since we've simplified the profile, no user preferences to load
+      const preferences = {
+        cuisines: [],
+        dietaryRestrictions: []
+      };
+      
+      setUserPreferences(preferences);
+    } catch (error) {
+      console.error('❌ Error loading user preferences:', error);
+    }
+  };
+
+  const loadFeaturedRecipes = async (isLoadingMore = false) => {
+    if (isLoadingMore) {
+      setLoadingMore(true);
+    } else {
+      setLoading(true);
+    }
+    try {
+      // Using Tasty API from RapidAPI
+      let pageOffset;
+      if (isLoadingMore) {
+        // For loading more, use sequential pagination
+        pageOffset = allLoadedRecipes.length;
+      } else {
+        // For initial load, use random offset to get different recipes each time
+        // Generate random offset between 0-2000 to get different starting points
+        pageOffset = Math.floor(Math.random() * 2000);
+      }
+      
+      let apiUrl = `https://tasty.p.rapidapi.com/recipes/list?from=${pageOffset}&size=40`; // Increased size for better randomization
+      
+      // Add user preference filters for authenticated users
+      if (!isGuest && userPreferences.cuisines.length > 0) {
+        const cuisineMap = {
+          'italian': 'italian',
+          'mexican': 'mexican',
+          'chinese': 'chinese',
+          'japanese': 'japanese',
+          'indian': 'indian',
+          'thai': 'thai',
+          'mediterranean': 'mediterranean',
+          'american': 'american',
+          'french': 'french',
+          'greek': 'greek'
+        };
+        
+        const tastyTags = userPreferences.cuisines
+          .map(c => cuisineMap[c])
+          .filter(Boolean)
+          .join(',');
+        
+        if (tastyTags) {
+          apiUrl += `&tags=${tastyTags}`;
+        }
+      }
+
+      const response = await fetch(apiUrl, {
+        method: 'GET',
+        headers: {
+          'x-rapidapi-key': '0b5f1c0661msh2e3ca9ee26bb396p14c318jsn2df1c34cf519',
+          'x-rapidapi-host': 'tasty.p.rapidapi.com'
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      
+      if (!data.results || data.results.length === 0) {
+        // Fallback to basic request if no results
+        const fallbackOffset = Math.floor(Math.random() * 1000); // Random fallback too
+        const fallbackUrl = `https://tasty.p.rapidapi.com/recipes/list?from=${fallbackOffset}&size=40`;
+        
+        const fallbackResponse = await fetch(fallbackUrl, {
+          method: 'GET',
+          headers: {
+            'x-rapidapi-key': '0b5f1c0661msh2e3ca9ee26bb396p14c318jsn2df1c34cf519',
+            'x-rapidapi-host': 'tasty.p.rapidapi.com'
+          }
+        });
+        const fallbackData = await fallbackResponse.json();
+        data.results = fallbackData.results || [];
+      }
+
+      // Transform Tasty API data to match our format
+      const transformedRecipes = data.results.map(recipe => {
+        // Extract cuisine type from tags
+        let cuisineType = 'international';
+        if (recipe.tags && recipe.tags.length > 0) {
+          const cuisineTag = recipe.tags.find(tag => 
+            ['italian', 'mexican', 'chinese', 'japanese', 'indian', 'thai', 'mediterranean', 'american', 'french', 'greek'].includes(tag.name?.toLowerCase())
+          );
+          if (cuisineTag) {
+            cuisineType = cuisineTag.name.toLowerCase();
+          }
+        }
+
+        // Extract dietary information from tags
+        const dietary = [];
+        if (recipe.tags) {
+          recipe.tags.forEach(tag => {
+            const tagName = tag.name?.toLowerCase();
+            if (tagName?.includes('vegetarian')) dietary.push('vegetarian');
+            if (tagName?.includes('vegan')) dietary.push('vegan');
+            if (tagName?.includes('gluten') && tagName?.includes('free')) dietary.push('gluten-free');
+            if (tagName?.includes('dairy') && tagName?.includes('free')) dietary.push('dairy-free');
+            if (tagName?.includes('keto')) dietary.push('keto');
+          });
+        }
+
+        // Determine cooking time with better fallback logic (allow up to 2 hours = 120 minutes)
+        let totalTime = recipe.total_time_minutes || recipe.cook_time_minutes || recipe.prep_time_minutes;
+        
+        // If no time data available, assign a realistic random time based on recipe complexity
+        if (!totalTime) {
+          const instructionCount = recipe.instructions?.length || 0;
+          const componentCount = recipe.sections?.length || 0;
+          
+          // Generate realistic cooking times based on recipe complexity
+          if (instructionCount <= 4 && componentCount <= 1) {
+            // Simple recipes: 15-45 minutes
+            totalTime = Math.floor(Math.random() * 30) + 15;
+          } else if (instructionCount <= 8 && componentCount <= 2) {
+            // Medium recipes: 30-75 minutes
+            totalTime = Math.floor(Math.random() * 45) + 30;
+          } else {
+            // Complex recipes: 45-120 minutes
+            totalTime = Math.floor(Math.random() * 75) + 45;
+          }
+        }
+
+        // Cap at 2 hours maximum but don't exclude longer recipes, just cap them
+        if (totalTime > 120) {
+          totalTime = 120;
+        }
+
+        const instructionCount = recipe.instructions?.length || 0;
+        
+        // Determine difficulty based on time and complexity
+        let difficulty = 'Easy';
+        if (totalTime > 45 || instructionCount > 6) {
+          difficulty = 'Medium';
+        }
+        if (totalTime > 75 || instructionCount > 10) {
+          difficulty = 'Hard';
+        }
+
+        // Get the best thumbnail image
+        const thumbnailUrl = recipe.thumbnail_url || 
+                           (recipe.renditions && recipe.renditions.find(r => r.name === 'facebook')?.url) ||
+                           'https://images.unsplash.com/photo-1565299624946-b28f40a0ca4b?w=400&h=300&fit=crop';
+
+        // Better URL extraction - try multiple fields and construct Tasty URL if needed
+        let sourceUrl = recipe.original_video_url || 
+                       recipe.beauty_url || 
+                       recipe.video_url;
+        
+        // If no direct URL, construct a Tasty recipe URL using the slug or ID
+        if (!sourceUrl) {
+          if (recipe.slug) {
+            sourceUrl = `https://tasty.co/recipe/${recipe.slug}`;
+          } else if (recipe.canonical_id) {
+            sourceUrl = `https://tasty.co/recipe/${recipe.canonical_id}`;
+          } else if (recipe.id) {
+            sourceUrl = `https://tasty.co/recipe/${recipe.id}`;
+          }
+        }
+
+        return {
+          id: recipe.id,
+          title: recipe.name || 'Delicious Recipe',
+          image: thumbnailUrl,
+          readyInMinutes: totalTime,
+          difficulty: difficulty,
+          cuisineType: cuisineType,
+          dietary: dietary,
+          description: recipe.description ? 
+            recipe.description.substring(0, 100) + '...' : 
+            'A delicious recipe perfect for your next meal',
+          sourceUrl: sourceUrl,
+          tastyId: recipe.id
+        };
+      });
+
+      // Shuffle the recipes for additional randomization
+      const shuffledRecipes = [...transformedRecipes].sort(() => Math.random() - 0.5);
+
+      if (isLoadingMore) {
+        // Add new batch to existing loaded recipes (take first 20 from shuffled results)
+        const newRecipes = shuffledRecipes.slice(0, 20);
+        setAllLoadedRecipes(prev => [...prev, ...newRecipes]);
+        setRecipes(prev => [...prev, ...newRecipes]);
+      } else {
+        // Initial load - store all recipes and show first 20 (from shuffled results)
+        const initialRecipes = shuffledRecipes.slice(0, 20);
+        setAllLoadedRecipes(shuffledRecipes);
+        setRecipes(initialRecipes);
+        setDisplayedCount(initialRecipes.length);
+      }
+    } catch (error) {
+      console.error('❌ Error loading recipes from Tasty API:', error);
+      
+      // Fallback to a few basic recipes if API fails
+      const fallbackRecipes = [
+        {
+          id: 'fallback-1',
+          title: "Simple Chicken Dinner",
+          image: "https://images.unsplash.com/photo-1598103442097-8b74394b95c6?w=400&h=300&fit=crop",
+          readyInMinutes: 30,
+          difficulty: "Easy",
+          cuisineType: "american",
+          dietary: [],
+          description: "A quick and delicious chicken dinner perfect for weeknights"
+        },
+        {
+          id: 'fallback-2',
+          title: "Pasta Night",
+          image: "https://images.unsplash.com/photo-1621996346565-e3dbc353d2c5?w=400&h=300&fit=crop",
+          readyInMinutes: 25,
+          difficulty: "Easy",
+          cuisineType: "italian",
+          dietary: ["vegetarian"],
+          description: "Comforting pasta dish that's ready in no time"
+        }
+      ];
+      
+      // Shuffle fallback recipes too
+      const shuffledFallback = [...fallbackRecipes].sort(() => Math.random() - 0.5);
+      
+      if (isLoadingMore) {
+        setAllLoadedRecipes(prev => [...prev, ...shuffledFallback]);
+        setRecipes(prev => [...prev, ...shuffledFallback]);
+      } else {
+        setAllLoadedRecipes(shuffledFallback);
+        setRecipes(shuffledFallback);
+      }
+    } finally {
+      setLoading(false);
+      setLoadingMore(false);
+    }
+  };
+
+  const openRecipe = (recipe) => {
+    setSelectedRecipe(recipe);
+    setModalVisible(true);
+    
+    // Start animation
+    Animated.spring(modalAnimation, {
+      toValue: 1,
+      useNativeDriver: true,
+      tension: 100,
+      friction: 8,
+    }).start();
+  };
+
+  const closeModal = () => {
+    Animated.spring(modalAnimation, {
+      toValue: 0,
+      useNativeDriver: true,
+      tension: 100,
+      friction: 8,
+    }).start(() => {
+      setModalVisible(false);
+      setSelectedRecipe(null);
+    });
+  };
+
+  const openExternalLink = () => {
+    const url = selectedRecipe?.sourceUrl;
+    
+    if (url) {
+      Linking.openURL(url).catch(err => {
+        console.error('❌ Failed to open recipe URL:', err);
+        
+        // If the constructed URL fails, try a generic Tasty search
+        const searchQuery = encodeURIComponent(selectedRecipe?.title || '');
+        const fallbackUrl = `https://tasty.co/search?q=${searchQuery}`;
+        
+        Linking.openURL(fallbackUrl).catch(fallbackErr => {
+          console.error('❌ Fallback URL also failed:', fallbackErr);
+          Alert.alert('Error', `Sorry, we couldn't open the recipe link. You can search for "${selectedRecipe?.title}" on tasty.co manually.`);
+        });
+      });
+    } else {
+      // Provide a fallback action - search on Tasty.co
+      const searchQuery = encodeURIComponent(selectedRecipe?.title || '');
+      const searchUrl = `https://tasty.co/search?q=${searchQuery}`;
+      
+      Alert.alert(
+        'No Direct Link Available',
+        `This recipe doesn't have a direct link. Would you like to search for "${selectedRecipe?.title}" on Tasty.co?`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { 
+            text: 'Search', 
+            onPress: () => {
+              Linking.openURL(searchUrl).catch(err => {
+                console.error('❌ Search URL failed:', err);
+                Alert.alert('Error', `Please visit tasty.co and search for "${selectedRecipe?.title}" manually.`);
+              });
+            }
+          }
+        ]
+      );
+    }
+  };
+
+  const getDifficultyColor = (difficulty) => {
+    switch (difficulty.toLowerCase()) {
+      case 'easy': return '#4CAF50';
+      case 'medium': return '#FF9800';
+      case 'hard': return '#F44336';
+      default: return '#8B7355';
+    }
+  };
+
+  const formatTime = (minutes) => {
+    if (minutes < 60) {
+      return `${minutes} min`;
+    } else {
+      const hours = Math.floor(minutes / 60);
+      const remainingMinutes = minutes % 60;
+      return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+    }
+  };
+
+  // Transform meals from API format to recipe format
+  const transformMealsToRecipes = (meals) => {
+    return meals.map(recipe => {
+      // Extract cuisine type from tags
+      let cuisineType = 'international';
+      if (recipe.tags && recipe.tags.length > 0) {
+        const cuisineTag = recipe.tags.find(tag => 
+          ['italian', 'mexican', 'chinese', 'japanese', 'indian', 'thai', 'mediterranean', 'american', 'french', 'greek'].includes(tag.name?.toLowerCase())
+        );
+        if (cuisineTag) {
+          cuisineType = cuisineTag.name.toLowerCase();
+        }
+      }
+
+      // Extract dietary information from tags
+      const dietary = [];
+      if (recipe.tags) {
+        recipe.tags.forEach(tag => {
+          const tagName = tag.name?.toLowerCase();
+          if (tagName?.includes('vegetarian')) dietary.push('vegetarian');
+          if (tagName?.includes('vegan')) dietary.push('vegan');
+          if (tagName?.includes('gluten') && tagName?.includes('free')) dietary.push('gluten-free');
+          if (tagName?.includes('dairy') && tagName?.includes('free')) dietary.push('dairy-free');
+          if (tagName?.includes('keto')) dietary.push('keto');
+        });
+      }
+
+      // Determine cooking time with better fallback logic
+      let totalTime = recipe.total_time_minutes || recipe.cook_time_minutes || recipe.prep_time_minutes;
+      
+      if (!totalTime) {
+        const instructionCount = recipe.instructions?.length || 0;
+        const componentCount = recipe.sections?.length || 0;
+        
+        if (instructionCount <= 4 && componentCount <= 1) {
+          totalTime = Math.floor(Math.random() * 30) + 15;
+        } else if (instructionCount <= 8 && componentCount <= 2) {
+          totalTime = Math.floor(Math.random() * 45) + 30;
+        } else {
+          totalTime = Math.floor(Math.random() * 75) + 45;
+        }
+      }
+
+      if (totalTime > 120) {
+        totalTime = 120;
+      }
+
+      const instructionCount = recipe.instructions?.length || 0;
+      
+      let difficulty = 'Easy';
+      if (totalTime > 45 || instructionCount > 6) {
+        difficulty = 'Medium';
+      }
+      if (totalTime > 75 || instructionCount > 10) {
+        difficulty = 'Hard';
+      }
+
+      const thumbnailUrl = recipe.thumbnail_url || 
+                         (recipe.renditions && recipe.renditions.find(r => r.name === 'facebook')?.url) ||
+                         'https://images.unsplash.com/photo-1565299624946-b28f40a0ca4b?w=400&h=300&fit=crop';
+
+      let sourceUrl = recipe.original_video_url || 
+                     recipe.beauty_url || 
+                     recipe.video_url;
+      
+      if (!sourceUrl) {
+        if (recipe.slug) {
+          sourceUrl = `https://tasty.co/recipe/${recipe.slug}`;
+        } else if (recipe.canonical_id) {
+          sourceUrl = `https://tasty.co/recipe/${recipe.canonical_id}`;
+        } else if (recipe.id) {
+          sourceUrl = `https://tasty.co/recipe/${recipe.id}`;
+        }
+      }
+
+      return {
+        id: recipe.id,
+        title: recipe.name || 'Delicious Recipe',
+        image: thumbnailUrl,
+        readyInMinutes: totalTime,
+        difficulty: difficulty,
+        cuisineType: cuisineType,
+        dietary: dietary,
+        description: recipe.description ? 
+          recipe.description.substring(0, 100) + '...' : 
+          'A delicious recipe perfect for your next meal',
+        sourceUrl: sourceUrl,
+        tastyId: recipe.id
+      };
+    });
+  };
+
+  const getCurrentDate = () => {
+    const today = new Date();
+    const options = { 
+      weekday: 'long', 
+      year: 'numeric', 
+      month: 'long', 
+      day: 'numeric' 
+    };
+    return today.toLocaleDateString('en-US', options);
+  };
+
+  const refreshRecipes = async () => {
+    const newDisplayCount = displayedCount + 20;
+    
+    if (newDisplayCount <= allLoadedRecipes.length) {
+      // Show more from existing loaded recipes
+      setLoadingMore(true);
+      setTimeout(() => {
+        setRecipes(allLoadedRecipes.slice(0, newDisplayCount));
+        setDisplayedCount(newDisplayCount);
+        setLoadingMore(false);
+      }, 500); // Small delay for UX
+    } else {
+      // Need to load more from API
+      await loadFeaturedRecipes(true);
+    }
+  };
+
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#8B7355" />
+          <Text style={styles.loadingText}>Discovering delicious recipes from Tasty...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.container}>
+      {/* Background Watermark */}
+      <SafeDrawing 
+        source={require('../assets/drawing4.png')}
+        style={styles.backgroundWatermark}
+      />
+      
+      <ScrollView 
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Header */}
+        <View style={styles.header}>
+                          <Text style={styles.title}>Today's Inspiration</Text>
+          <Text style={styles.dateText}>{getCurrentDate()}</Text>
+
+        </View>
+
+        {/* Recipe Grid */}
+        <View style={styles.recipesContainer}>
+          <Text style={styles.sectionTitle}>Featured Recipes</Text>
+
+          
+          {recipes.map((recipe) => (
+            <TouchableOpacity 
+              key={recipe.id} 
+              style={styles.recipeCard}
+              onPress={() => openRecipe(recipe)}
+              activeOpacity={0.9}
+            >
+              <Image 
+                source={{ uri: recipe.image }} 
+                style={styles.recipeImage}
+                resizeMode="cover"
+              />
+              
+              <View style={styles.recipeContent}>
+                <View style={styles.recipeHeader}>
+                  <Text style={styles.recipeTitle}>{recipe.title}</Text>
+                  <View style={styles.recipeMetrics}>
+                    <View style={styles.timeContainer}>
+                      <Text style={styles.timeText}>{formatTime(recipe.readyInMinutes)}</Text>
+                    </View>
+                    <View style={[styles.difficultyContainer, { backgroundColor: getDifficultyColor(recipe.difficulty) }]}>
+                      <Text style={styles.difficultyText}>{recipe.difficulty}</Text>
+                    </View>
+                  </View>
+                </View>
+                
+                <Text style={styles.recipeDescription}>{recipe.description}</Text>
+                
+                {recipe.dietary.length > 0 && (
+                  <View style={styles.dietaryTags}>
+                    {recipe.dietary.slice(0, 2).map((dietary, index) => (
+                      <View key={index} style={styles.dietaryTag}>
+                        <Text style={styles.dietaryTagText}>{dietary}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </View>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {/* Bottom Action */}
+        <View style={styles.bottomAction}>
+          <TouchableOpacity 
+            style={[styles.moreRecipesButton, loadingMore && styles.buttonDisabled]}
+            onPress={refreshRecipes}
+            disabled={loadingMore}
+          >
+            {loadingMore ? (
+              <ActivityIndicator size="small" color="#FEFEFE" />
+            ) : (
+              <Text style={styles.moreRecipesButtonText}>
+                {displayedCount >= allLoadedRecipes.length ? 
+                  'Discover New Recipes' : 
+                  `Show More (${Math.min(20, allLoadedRecipes.length - displayedCount)} more available)`
+                }
+              </Text>
+            )}
+          </TouchableOpacity>
+          
+          {isGuest && (
+            <TouchableOpacity 
+              style={styles.signInPrompt}
+              onPress={() => navigation.navigate('SignIn')}
+            >
+              <Text style={styles.signInPromptText}>
+                Sign in for personalized recommendations
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </ScrollView>
+
+      {/* Recipe Details Modal */}
+      <Modal
+        visible={modalVisible}
+        transparent={true}
+        animationType="none"
+        onRequestClose={closeModal}
+      >
+        <View style={styles.modalOverlay}>
+          <TouchableOpacity 
+            style={styles.modalBackground}
+            activeOpacity={1}
+            onPress={closeModal}
+          />
+          
+          <Animated.View 
+            style={[
+              styles.modalContainer,
+              {
+                transform: [
+                  {
+                    scale: modalAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0.8, 1],
+                    }),
+                  },
+                ],
+                opacity: modalAnimation,
+              },
+            ]}
+          >
+            {/* Modal Header */}
+            <View style={styles.modalHeader}>
+              <TouchableOpacity style={styles.backButton} onPress={closeModal}>
+                <Text style={styles.backArrow}>←</Text>
+                <Text style={styles.backText}>Back</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Modal Content */}
+            <ScrollView style={styles.modalContent} showsVerticalScrollIndicator={false}>
+              {selectedRecipe ? (
+                <>
+                  <Image 
+                    source={{ uri: selectedRecipe.image }} 
+                    style={styles.modalImage}
+                    resizeMode="cover"
+                  />
+                  
+                  <View style={styles.modalInfo}>
+                    <Text style={styles.modalTitle}>{selectedRecipe.title}</Text>
+                    
+                    <View style={styles.modalMetrics}>
+                      <View style={styles.modalMetricItem}>
+                        <Text style={styles.metricLabel}>Cooking Time</Text>
+                        <Text style={styles.metricValue}>{formatTime(selectedRecipe.readyInMinutes)}</Text>
+                      </View>
+                      <View style={styles.modalMetricItem}>
+                        <Text style={styles.metricLabel}>Difficulty</Text>
+                        <Text style={[styles.metricValue, { color: getDifficultyColor(selectedRecipe.difficulty) }]}>
+                          {selectedRecipe.difficulty}
+                        </Text>
+                      </View>
+                      <View style={styles.modalMetricItem}>
+                        <Text style={styles.metricLabel}>Cuisine</Text>
+                        <Text style={styles.metricValue}>{selectedRecipe.cuisineType}</Text>
+                      </View>
+                    </View>
+
+                    {selectedRecipe.dietary && selectedRecipe.dietary.length > 0 && (
+                      <View style={styles.modalDietary}>
+                        <Text style={styles.dietaryTitle}>Dietary Information</Text>
+                        <View style={styles.modalDietaryTags}>
+                          {selectedRecipe.dietary.map((dietary, index) => (
+                            <View key={index} style={styles.modalDietaryTag}>
+                              <Text style={styles.modalDietaryText}>{dietary}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      </View>
+                    )}
+
+                    {selectedRecipe.description && (
+                      <View style={styles.modalDescription}>
+                        <Text style={styles.dietaryTitle}>Description</Text>
+                        <Text style={styles.descriptionText}>{selectedRecipe.description}</Text>
+                      </View>
+                    )}
+
+                    {/* Action Buttons */}
+                    <View style={styles.modalActions}>
+                      <TouchableOpacity style={styles.viewRecipeButton} onPress={openExternalLink}>
+                        <Text style={styles.viewRecipeText}>View Full Recipe & Video</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                </>
+              ) : (
+                <View style={styles.modalInfo}>
+                  <Text style={styles.modalTitle}>Loading recipe...</Text>
+                  <Text style={styles.metricValue}>Recipe data not available</Text>
+                </View>
+              )}
+            </ScrollView>
+          </Animated.View>
+        </View>
+      </Modal>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#FEFEFE',
+  },
+  scrollContent: {
+    flexGrow: 1,
+    paddingHorizontal: 24,
+    paddingTop: 20,
+    paddingBottom: 90,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 32,
+  },
+  loadingText: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 16,
+    color: '#6B6B6B',
+    marginTop: 16,
+    textAlign: 'center',
+  },
+  header: {
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  title: {
+    fontFamily: 'PlayfairDisplay_700Bold',
+    fontSize: 32,
+    lineHeight: 40,
+    color: '#2D2D2D',
+    textAlign: 'center',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  dateText: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 14,
+    lineHeight: 20,
+    color: '#6B6B6B',
+    textAlign: 'center',
+    letterSpacing: 0.1,
+    marginBottom: 8,
+  },
+  personalizedText: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 12,
+    lineHeight: 16,
+    color: '#8B7355',
+    textAlign: 'center',
+    letterSpacing: 0.1,
+    fontStyle: 'italic',
+  },
+  recipesContainer: {
+    marginBottom: 32,
+  },
+  sectionTitle: {
+    fontFamily: 'PlayfairDisplay_700Bold',
+    fontSize: 24,
+    lineHeight: 30,
+    color: '#2D2D2D',
+    marginBottom: 8,
+    letterSpacing: 0.3,
+  },
+  sectionDescription: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 14,
+    lineHeight: 20,
+    color: '#6B6B6B',
+    marginBottom: 24,
+    letterSpacing: 0.1,
+  },
+  recipeCard: {
+    backgroundColor: '#F8F6F3',
+    borderRadius: 16,
+    marginBottom: 24,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  recipeImage: {
+    width: '100%',
+    height: 200,
+  },
+  recipeContent: {
+    padding: 20,
+  },
+  recipeHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  recipeTitle: {
+    fontFamily: 'PlayfairDisplay_700Bold',
+    fontSize: 20,
+    lineHeight: 26,
+    color: '#2D2D2D',
+    letterSpacing: 0.3,
+    flex: 1,
+    marginRight: 12,
+  },
+  recipeMetrics: {
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+  timeContainer: {
+    backgroundColor: '#8B7355',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  timeText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 12,
+    lineHeight: 16,
+    color: '#FEFEFE',
+    letterSpacing: 0.1,
+  },
+  difficultyContainer: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  difficultyText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 12,
+    lineHeight: 16,
+    color: '#FEFEFE',
+    letterSpacing: 0.1,
+  },
+  recipeDescription: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 14,
+    lineHeight: 20,
+    color: '#6B6B6B',
+    marginBottom: 16,
+    letterSpacing: 0.1,
+  },
+  dietaryTags: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  dietaryTag: {
+    backgroundColor: '#E8E6E3',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  dietaryTagText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 10,
+    lineHeight: 14,
+    color: '#6B6B6B',
+    letterSpacing: 0.1,
+    textTransform: 'uppercase',
+  },
+  bottomAction: {
+    alignItems: 'center',
+    gap: 16,
+  },
+  moreRecipesButton: {
+    backgroundColor: '#8B7355',
+    borderRadius: 8,
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+    alignItems: 'center',
+  },
+  buttonDisabled: {
+    backgroundColor: '#A0A0A0',
+  },
+  moreRecipesButtonText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 16,
+    lineHeight: 24,
+    color: '#FEFEFE',
+    letterSpacing: 0.2,
+  },
+  signInPrompt: {
+    padding: 16,
+  },
+  signInPromptText: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 14,
+    lineHeight: 20,
+    color: '#8B7355',
+    textAlign: 'center',
+    letterSpacing: 0.1,
+    textDecorationLine: 'underline',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(45, 45, 45, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 50,
+  },
+  modalBackground: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  modalContainer: {
+    width: '100%',
+    maxWidth: 420,
+    height: '88%',
+    backgroundColor: '#FEFEFE',
+    borderRadius: 20,
+    overflow: 'hidden',
+    shadowColor: '#2D2D2D',
+    shadowOffset: {
+      width: 0,
+      height: 12,
+    },
+    shadowOpacity: 0.15,
+    shadowRadius: 24,
+    elevation: 12,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 18,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F5F3F0',
+    backgroundColor: '#FEFEFE',
+  },
+  backButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 12,
+    backgroundColor: '#F5F3F0',
+  },
+  backArrow: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 18,
+    color: '#8B7355',
+    marginRight: 6,
+  },
+  backText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 15,
+    color: '#8B7355',
+    letterSpacing: 0.2,
+  },
+  modalContent: {
+    flex: 1,
+    backgroundColor: '#FEFEFE',
+  },
+  modalImage: {
+    width: '100%',
+    height: 240,
+  },
+  modalInfo: {
+    padding: 32,
+  },
+  modalTitle: {
+    fontFamily: 'PlayfairDisplay_700Bold',
+    fontSize: 26,
+    lineHeight: 34,
+    color: '#2D2D2D',
+    marginBottom: 26,
+    letterSpacing: 0.3,
+  },
+  modalMetrics: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 30,
+    gap: 28,
+  },
+  modalMetricItem: {
+    flex: 1,
+  },
+  metricLabel: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 12,
+    lineHeight: 16,
+    color: '#8B7355',
+    marginBottom: 6,
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
+  },
+  metricValue: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 16,
+    lineHeight: 22,
+    color: '#2D2D2D',
+    letterSpacing: 0.1,
+  },
+  modalDietary: {
+    marginBottom: 26,
+  },
+  dietaryTitle: {
+    fontFamily: 'PlayfairDisplay_700Bold',
+    fontSize: 18,
+    lineHeight: 24,
+    color: '#2D2D2D',
+    marginBottom: 14,
+    letterSpacing: 0.2,
+  },
+  modalDietaryTags: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  modalDietaryTag: {
+    backgroundColor: '#F5F3F0',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E8E6E3',
+  },
+  modalDietaryText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 12,
+    lineHeight: 16,
+    color: '#8B7355',
+    letterSpacing: 0.2,
+    textTransform: 'capitalize',
+  },
+  modalActions: {
+    alignItems: 'center',
+    marginTop: 12,
+  },
+  viewRecipeButton: {
+    backgroundColor: '#8B7355',
+    borderRadius: 12,
+    paddingHorizontal: 36,
+    paddingVertical: 16,
+    shadowColor: '#8B7355',
+    shadowOffset: {
+      width: 0,
+      height: 3,
+    },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  viewRecipeText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 15,
+    lineHeight: 20,
+    color: '#FEFEFE',
+    letterSpacing: 0.3,
+  },
+  modalDescription: {
+    marginBottom: 26,
+  },
+  descriptionText: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 15,
+    lineHeight: 22,
+    color: '#6B6B6B',
+    letterSpacing: 0.1,
+  },
+  backgroundWatermark: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    opacity: 0.1,
+  },
+}); 

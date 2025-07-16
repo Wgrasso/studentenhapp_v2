@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, SafeAreaView, ScrollView, TouchableOpacity, Image, Modal, Animated, Alert } from 'react-native';
+import { StyleSheet, Text, View, SafeAreaView, ScrollView, TouchableOpacity, Image, Modal, Animated, Alert, TextInput } from 'react-native';
 import { supabase } from '../lib/supabase';
-import { getUserGroups } from '../lib/groupsService';
+import { getUserGroups, createGroupInSupabase } from '../lib/groupsService';
 import { saveDinnerRequest, getAllDinnerRequests, recordUserResponse, createMealFromRequest } from '../lib/dinnerRequestService';
 
 // Safe image component that handles missing drawings gracefully
@@ -31,8 +31,8 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
   // Request state
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
-  const [selectedTime, setSelectedTime] = useState({ hour: null, minutes: null });
-  const [selectedRecipe, setSelectedRecipe] = useState(null);
+  const [selectedTime, setSelectedTime] = useState({ hour: null, minutes: 0 });
+  const [selectedRecipe, setSelectedRecipe] = useState('random'); // Default to random
   const [userGroups, setUserGroups] = useState([]);
   const [currentRequests, setCurrentRequests] = useState([]);
   const [currentRequestIndex, setCurrentRequestIndex] = useState(0);
@@ -47,10 +47,24 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
   const [showGroupModal, setShowGroupModal] = useState(false);
   const [showDateModal, setShowDateModal] = useState(false);
   const [showTimeModal, setShowTimeModal] = useState(false);
-  const [showConfirmModal, setShowConfirmModal] = useState(false);
+
+  const [showCreateGroupModal, setShowCreateGroupModal] = useState(false);
+  const [showConflictModal, setShowConflictModal] = useState(false);
+
+  // Create group form state
+  const [createGroupName, setCreateGroupName] = useState('');
+  const [createGroupLoading, setCreateGroupLoading] = useState(false);
   const [showRequestNotification, setShowRequestNotification] = useState(false);
   const [modalAnimation] = useState(new Animated.Value(0));
   const [notificationAnimation] = useState(new Animated.Value(0));
+
+  // Conflict modal data
+  const [conflictData, setConflictData] = useState({
+    title: '',
+    message: '',
+    confirmText: '',
+    onConfirm: null
+  });
 
   useEffect(() => {
     if (!isGuest) {
@@ -223,9 +237,7 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
       case 'time':
         setShowTimeModal(true);
         break;
-      case 'confirm':
-        setShowConfirmModal(true);
-        break;
+
       case 'notification':
         setShowRequestNotification(true);
         Animated.spring(notificationAnimation, {
@@ -255,7 +267,7 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
       setShowGroupModal(false);
       setShowDateModal(false);
       setShowTimeModal(false);
-      setShowConfirmModal(false);
+      setShowCreateGroupModal(false);
     });
   };
 
@@ -539,37 +551,30 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
   }, [showRequestNotification, currentRequests, currentRequestIndex]);
 
   const canSendRequest = () => {
-    return selectedGroup && selectedDate && selectedTime.hour !== null && selectedTime.minutes !== null;
+    return selectedGroup && selectedDate && selectedTime.hour !== null;
   };
 
   const handleSendRequest = () => {
     if (!canSendRequest()) return;
-    // Set default recipe option to "Random" when opening confirmation
-    if (!selectedRecipe) {
-      setSelectedRecipe('random');
-    }
-    openModal('confirm');
+    // Send the dinner request directly without intermediate popup
+    handleSendDinnerRequest();
   };
 
-  const confirmSendRequest = async () => {
+  const handleSendDinnerRequest = async () => {
+    console.log('📝 Sending dinner request...');
+    
     if (!selectedGroup || !selectedDate || selectedTime.hour === null || !selectedRecipe) {
       Alert.alert('Error', 'Please complete all selections before sending the request.');
       return;
     }
 
-    console.log('📤 Sending dinner request...');
-
-    // Format date for database (YYYY-MM-DD)
-    const formattedDate = selectedDate.date.toISOString().split('T')[0];
-    
-    // Format time for database (HH:MM:SS)
+    // Format date and time for request
+    const formattedDate = `${selectedDate.date.getFullYear()}-${(selectedDate.date.getMonth() + 1).toString().padStart(2, '0')}-${selectedDate.date.getDate().toString().padStart(2, '0')}`;
     const formattedTime = `${selectedTime.hour.toString().padStart(2, '0')}:${selectedTime.minutes.toString().padStart(2, '0')}:00`;
     
-    // Calculate deadline time (30 minutes before meal time)
-    const deadlineHour = selectedTime.hour;
-    const deadlineMinutes = selectedTime.minutes - 30;
-    let adjustedHour = deadlineHour;
-    let adjustedMinutes = deadlineMinutes;
+    // Calculate deadline (15 minutes before the meal time)
+    let adjustedHour = selectedTime.hour;
+    let adjustedMinutes = selectedTime.minutes - 15;
     
     if (adjustedMinutes < 0) {
       adjustedMinutes += 60;
@@ -578,6 +583,97 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
     
     const formattedDeadline = `${adjustedHour.toString().padStart(2, '0')}:${adjustedMinutes.toString().padStart(2, '0')}:00`;
 
+    // CONFLICT DETECTION: Check for existing active sessions or terminated results
+    console.log('🔍 Checking for conflicts before sending dinner request...');
+    
+    try {
+      // Import the necessary services
+      const { getActiveMealRequest } = await import('../lib/mealRequestService');
+      const { terminatedSessionsService } = await import('../lib/terminatedSessionsService');
+      
+      // Check for active meal request
+      const activeMealResult = await getActiveMealRequest(selectedGroup.group_id);
+      const hasActiveMealRequest = activeMealResult.success && activeMealResult.hasActiveRequest;
+      
+      // Check for terminated session results
+      const terminatedResult = await terminatedSessionsService.getTerminatedSession(selectedGroup.group_id);
+      const hasTerminatedResults = terminatedResult.success && terminatedResult.data;
+      
+      console.log('🔍 Conflict check results:');
+      console.log('- Active meal request:', hasActiveMealRequest);
+      console.log('- Terminated results:', hasTerminatedResults);
+      
+      if (hasActiveMealRequest || hasTerminatedResults) {
+        // Show confirmation dialog based on conflict type
+        let conflictTitle, conflictMessage, confirmButtonText;
+        
+        if (hasActiveMealRequest) {
+          conflictTitle = 'Active Voting Session Found';
+          conflictMessage = 'This group currently has an active voting session. To send a new dinner request, the current voting must be terminated first.\n\nDo you want to terminate the current voting session and start a new dinner request?';
+          confirmButtonText = 'Terminate & Create New';
+        } else if (hasTerminatedResults) {
+          conflictTitle = 'Previous Results Still Displayed';
+          conflictMessage = 'This group still has previous meal results displayed. To send a new dinner request, these results must be cleared first.\n\nDo you want to clear the previous results and start a new dinner request?';
+          confirmButtonText = 'Clear & Create New';
+        }
+        
+        // Show custom styled conflict modal
+        setConflictData({
+          title: conflictTitle,
+          message: conflictMessage,
+          confirmText: confirmButtonText,
+          onConfirm: async () => {
+            console.log('✅ User confirmed clearing conflicts and proceeding');
+            setShowConflictModal(false);
+            await handleClearConflictsAndProceed(formattedDate, formattedTime, formattedDeadline);
+          }
+        });
+        setShowConflictModal(true);
+        return; // Stop here and wait for user decision
+      }
+      
+      // No conflicts, proceed normally
+      await proceedWithDinnerRequest(formattedDate, formattedTime, formattedDeadline);
+      
+    } catch (error) {
+      console.error('❌ Error checking conflicts:', error);
+      Alert.alert('Error', 'Failed to check for existing sessions. Please try again.');
+    }
+  };
+
+  const handleClearConflictsAndProceed = async (formattedDate, formattedTime, formattedDeadline) => {
+    console.log('🧹 Clearing conflicts and proceeding with dinner request...');
+    
+    try {
+      // Import necessary services
+      const { terminatedSessionsService } = await import('../lib/terminatedSessionsService');
+      
+      // Clear terminated results if they exist
+      const clearTerminatedResult = await terminatedSessionsService.clearTerminatedSession(selectedGroup.group_id);
+      if (!clearTerminatedResult.success) {
+        console.warn('⚠️ Failed to clear terminated results:', clearTerminatedResult.error);
+      }
+      
+      // Clean up any active session data
+      const cleanupResult = await terminatedSessionsService.cleanupActiveSession(selectedGroup.group_id);
+      if (!cleanupResult.success && !cleanupResult.partialSuccess) {
+        console.warn('⚠️ Failed to cleanup active session:', cleanupResult.error);
+      }
+      
+      console.log('✅ Conflicts cleared, proceeding with dinner request...');
+      
+      // Now proceed with the dinner request
+      await proceedWithDinnerRequest(formattedDate, formattedTime, formattedDeadline);
+      
+    } catch (error) {
+      console.error('❌ Error clearing conflicts:', error);
+      Alert.alert('Error', 'Failed to clear existing sessions. Please try again.');
+    }
+  };
+
+  const proceedWithDinnerRequest = async (formattedDate, formattedTime, formattedDeadline) => {
+    console.log('📤 Proceeding with dinner request...');
+    
     const requestData = {
       groupId: selectedGroup.group_id,
       date: formattedDate,
@@ -592,29 +688,25 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
       const result = await saveDinnerRequest(requestData);
       
       if (result.success) {
-        console.log('✅ Dinner request sent successfully');
-        console.log('🍽️ Meal session created:', result.mealSessionCreated);
         
         let successMessage = result.message;
         if (result.mealSessionCreated) {
           successMessage += '\n\nGroup members can now respond and start voting immediately!';
         }
         
-        Alert.alert('Success', successMessage);
         closeModal();
         
-        // Trigger refresh of groups data when navigating back
+        // Clear terminated results for this group (groups will refresh automatically)
         if (navigation.getParent()) {
           navigation.getParent().setParams({ 
-            refreshGroups: Date.now(),
-            clearTerminatedResults: selectedGroup.group_id // Clear previous results for this group
+            clearTerminatedResults: selectedGroup.group_id
           });
         }
         
         // Reset selections
         setSelectedGroup(null);
         setSelectedDate(null);
-        setSelectedTime({ hour: null, minutes: null });
+        setSelectedTime({ hour: null, minutes: 0 });
         setSelectedRecipe(null);
       } else {
         console.error('❌ Failed to send dinner request:', result.error);
@@ -623,6 +715,61 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
     } catch (error) {
       console.error('❌ Unexpected error:', error);
       Alert.alert('Error', 'An unexpected error occurred while sending the request.');
+    }
+  };
+
+  const handleCreateGroup = async () => {
+    if (!createGroupName.trim()) {
+      Alert.alert('Invalid Input', 'Please enter a group name');
+      return;
+    }
+
+    setCreateGroupLoading(true);
+    
+    try {
+      console.log('🏗️ Creating new group:', createGroupName);
+      const result = await createGroupInSupabase(createGroupName, ''); // No description
+      
+      if (result && result.success) {
+        console.log('✅ Group created successfully:', result.group);
+        
+        // Close modal with animation and reset form
+        Animated.spring(modalAnimation, {
+          toValue: 0,
+          useNativeDriver: true,
+          tension: 100,
+          friction: 8,
+        }).start(() => {
+          setShowCreateGroupModal(false);
+          setCreateGroupName('');
+        });
+        
+        // Refresh groups list
+        loadUserGroups();
+        
+        // Auto-select the new group
+        if (result.group) {
+          setSelectedGroup({
+            group_id: result.group.id,
+            group_name: result.group.name,
+            member_count: 1 // Creator is the first member
+          });
+        }
+        
+        Alert.alert(
+          'Success',
+          `"${result.group?.name || createGroupName}" has been created successfully!\n\nJoin Code: ${result.group?.join_code}\n\nShare this code with others to invite them to your group.`,
+          [{ text: 'OK' }]
+        );
+      } else {
+        console.error('❌ Failed to create group:', result?.error);
+        Alert.alert('Error', result?.error || 'Failed to create group. Please try again.');
+      }
+    } catch (error) {
+      console.error('❌ Error creating group:', error);
+      Alert.alert('Error', 'An unexpected error occurred while creating the group.');
+    } finally {
+      setCreateGroupLoading(false);
     }
   };
 
@@ -751,7 +898,52 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
               {selectedTime.hour !== null ? formatTime(selectedTime.hour, selectedTime.minutes) : 'Select a time'}
             </Text>
           </TouchableOpacity>
-                </View>
+        </View>
+
+        {/* Recipe Type Selection */}
+        <View style={styles.recipeSection}>
+          <Text style={styles.recipeTitle}>Recipe Type</Text>
+          <View style={styles.recipeOptions}>
+            <TouchableOpacity 
+              style={[
+                styles.recipeOption,
+                selectedRecipe === 'random' && styles.recipeOptionSelected
+              ]}
+              onPress={() => setSelectedRecipe('random')}
+            >
+              <Text style={[
+                styles.recipeOptionText,
+                selectedRecipe === 'random' && styles.recipeOptionTextSelected
+              ]}>Random</Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity 
+              style={[
+                styles.recipeOption,
+                selectedRecipe === 'wishlist' && styles.recipeOptionSelected
+              ]}
+              onPress={() => setSelectedRecipe('wishlist')}
+            >
+              <Text style={[
+                styles.recipeOptionText,
+                selectedRecipe === 'wishlist' && styles.recipeOptionTextSelected
+              ]}>Wishlist</Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity
+              style={[
+                styles.recipeOption,
+                selectedRecipe === 'swipe' && styles.recipeOptionSelected
+              ]}
+              onPress={() => setSelectedRecipe('swipe')}
+            >
+              <Text style={[
+                styles.recipeOptionText,
+                selectedRecipe === 'swipe' && styles.recipeOptionTextSelected
+              ]}>Swipe</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
 
         {/* Send Request Button */}
         <TouchableOpacity 
@@ -824,8 +1016,22 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
                 <View style={styles.modalOption}>
                   <Text style={styles.modalOptionText}>No groups found</Text>
                   <Text style={styles.modalOptionSubtext}>Join or create a group first</Text>
-            </View>
-          )}
+                </View>
+              )}
+              
+              {/* Add Group Option */}
+              <TouchableOpacity
+                style={[styles.modalOption, styles.addGroupOption]}
+                onPress={() => {
+                  console.log('🔵 Add Group button pressed');
+                  Alert.alert('Debug', 'Add Group button was pressed!');
+                  setShowGroupModal(false);
+                  setShowCreateGroupModal(true);
+                }}
+              >
+                <Text style={styles.addGroupText}>+ Add Group</Text>
+                <Text style={styles.modalOptionSubtext}>Create a new cooking group</Text>
+              </TouchableOpacity>
             </ScrollView>
             <TouchableOpacity style={styles.modalCloseButton} onPress={closeModal}>
               <Text style={styles.modalCloseText}>Cancel</Text>
@@ -944,14 +1150,14 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
               <TouchableOpacity 
                 style={[
                   styles.modalConfirmButton,
-                  selectedTime.hour !== null && selectedTime.minutes !== null && styles.modalConfirmButtonEnabled
+                  selectedTime.hour !== null && styles.modalConfirmButtonEnabled
                 ]}
                 onPress={() => {
-                  if (selectedTime.hour !== null && selectedTime.minutes !== null) {
+                  if (selectedTime.hour !== null) {
                     closeModal();
                   }
                 }}
-                disabled={selectedTime.hour === null || selectedTime.minutes === null}
+                disabled={selectedTime.hour === null}
               >
                 <Text style={styles.modalConfirmText}>Confirm</Text>
               </TouchableOpacity>
@@ -963,101 +1169,7 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
         </View>
       </Modal>
 
-      {/* Confirmation Modal */}
-      <Modal visible={showConfirmModal} transparent={true} animationType="none">
-        <View style={styles.modalOverlay}>
-          <Animated.View 
-            style={[
-              styles.modalContainer,
-              {
-                transform: [
-                  {
-                    scale: modalAnimation.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [0.8, 1],
-                    }),
-                  },
-                ],
-                opacity: modalAnimation,
-              },
-            ]}
-          >
-            <Text style={styles.modalTitle}>Confirm Request</Text>
-            
-            <View style={styles.confirmationDetails}>
-              <View style={styles.confirmationRow}>
-                <Text style={styles.confirmationLabel}>Group:</Text>
-                <Text style={styles.confirmationValue}>{selectedGroup?.group_name || selectedGroup?.name}</Text>
-              </View>
-              <View style={styles.confirmationRow}>
-                <Text style={styles.confirmationLabel}>Date:</Text>
-                <Text style={styles.confirmationValue}>{selectedDate?.fullLabel}</Text>
-              </View>
-              <View style={styles.confirmationRow}>
-                <Text style={styles.confirmationLabel}>Time:</Text>
-                <Text style={styles.confirmationValue}>
-                  {formatTime(selectedTime.hour, selectedTime.minutes)}
-            </Text>
-              </View>
-              <View style={styles.confirmationRowWithSelector}>
-                <Text style={styles.confirmationLabel}>Recipe:</Text>
-                <View style={styles.recipeSelector}>
-              <TouchableOpacity 
-                    style={[
-                      styles.recipeSelectorOption,
-                      selectedRecipe === 'random' && styles.recipeSelectorOptionSelected
-                    ]}
-                    onPress={() => setSelectedRecipe('random')}
-                  >
-                    <Text style={[
-                      styles.recipeSelectorText,
-                      selectedRecipe === 'random' && styles.recipeSelectorTextSelected
-                    ]}>Random</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity 
-                    style={[
-                      styles.recipeSelectorOption,
-                      selectedRecipe === 'wishlist' && styles.recipeSelectorOptionSelected
-                    ]}
-                    onPress={() => setSelectedRecipe('wishlist')}
-                  >
-                    <Text style={[
-                      styles.recipeSelectorText,
-                      selectedRecipe === 'wishlist' && styles.recipeSelectorTextSelected
-                    ]}>Wishlist</Text>
-                  </TouchableOpacity>
-                  
-                  <TouchableOpacity
-                    style={[
-                      styles.recipeSelectorOption,
-                      selectedRecipe === 'swipe' && styles.recipeSelectorOptionSelected
-                    ]}
-                    onPress={() => setSelectedRecipe('swipe')}
-                  >
-                    <Text style={[
-                      styles.recipeSelectorText,
-                      selectedRecipe === 'swipe' && styles.recipeSelectorTextSelected
-                    ]}>Swipe</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-            </View>
 
-            <View style={styles.modalButtonContainer}>
-            <TouchableOpacity 
-                style={[styles.modalConfirmButton, styles.modalConfirmButtonEnabled]}
-                onPress={confirmSendRequest}
-            >
-                <Text style={styles.modalConfirmText}>Send Request</Text>
-            </TouchableOpacity>
-              <TouchableOpacity style={styles.modalCloseButton} onPress={closeModal}>
-                <Text style={styles.modalCloseText}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-          </Animated.View>
-        </View>
-      </Modal>
 
       {/* Dinner Request Notification Modal */}
       <Modal visible={showRequestNotification} transparent={true} animationType="none">
@@ -1147,6 +1259,111 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
                    {timeRemaining}
                  </Text>
                </Animated.View>
+            </View>
+          </Animated.View>
+        </View>
+      </Modal>
+
+      {/* Create Group Modal */}
+      <Modal visible={showCreateGroupModal} transparent={true} animationType="none">
+        <View style={styles.modalOverlay}>
+          <TouchableOpacity 
+            style={styles.modalBackground} 
+            activeOpacity={1} 
+            onPress={() => {
+              setCreateGroupName('');
+              closeModal();
+            }} 
+          />
+          
+          <Animated.View 
+            style={[
+              styles.modalContainer,
+              {
+                transform: [{ scale: modalAnimation.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) }],
+                opacity: modalAnimation,
+              },
+            ]}
+          >
+            <Text style={styles.modalTitle}>Create New Group</Text>
+            
+            <View style={styles.inputContainer}>
+              <Text style={styles.inputLabel}>Group Name</Text>
+              <TextInput
+                style={styles.textInput}
+                value={createGroupName}
+                onChangeText={setCreateGroupName}
+                placeholder="Enter group name"
+                placeholderTextColor="#A0A0A0"
+                maxLength={50}
+              />
+            </View>
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity 
+                style={styles.modalCancelButton} 
+                onPress={() => {
+                  setCreateGroupName('');
+                  closeModal();
+                }}
+              >
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                style={[styles.modalConfirmButton, createGroupLoading && styles.modalConfirmButtonDisabled]} 
+                onPress={handleCreateGroup}
+                disabled={createGroupLoading}
+              >
+                <Text style={styles.modalConfirmText}>
+                  {createGroupLoading ? 'Creating...' : 'Create Group'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </Animated.View>
+        </View>
+      </Modal>
+
+      {/* Conflict Resolution Modal */}
+      <Modal visible={showConflictModal} transparent={true} animationType="none">
+        <View style={styles.modalOverlay}>
+          <Animated.View 
+            style={[
+              styles.modalContainer,
+              styles.conflictModalContainer,
+              {
+                transform: [
+                  {
+                    scale: modalAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0.8, 1],
+                    }),
+                  },
+                ],
+                opacity: modalAnimation,
+              },
+            ]}
+          >
+            <Text style={styles.conflictModalTitle}>{conflictData.title}</Text>
+            <Text style={styles.conflictModalMessage}>{conflictData.message}</Text>
+            
+            <View style={styles.conflictModalButtons}>
+              <TouchableOpacity 
+                style={styles.conflictCancelButton}
+                onPress={() => {
+                  console.log('❌ User cancelled dinner request due to conflict');
+                  setShowConflictModal(false);
+                }}
+              >
+                <Text style={styles.conflictCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                style={styles.conflictConfirmButton}
+                onPress={conflictData.onConfirm}
+              >
+                <Text style={styles.conflictConfirmText}>{conflictData.confirmText}</Text>
+              </TouchableOpacity>
             </View>
           </Animated.View>
         </View>
@@ -1553,37 +1770,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#E8E6E3',
   },
-  recipeSelector: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 8,
-    gap: 8,
-  },
-  recipeSelectorOption: {
-    flex: 1,
-    backgroundColor: '#F8F6F3',
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  recipeSelectorOptionSelected: {
-    backgroundColor: 'rgba(139, 115, 85, 0.1)',
-    borderColor: '#8B7355',
-  },
-  recipeSelectorText: {
-    fontFamily: 'Inter_500Medium',
-    fontSize: 14,
-    lineHeight: 20,
-    color: '#6B6B6B',
-    letterSpacing: 0.1,
-  },
-  recipeSelectorTextSelected: {
-    color: '#8B7355',
-    fontWeight: '600',
-  },
+
 
   // Test button styles
   testButton: {
@@ -1757,5 +1944,178 @@ const styles = StyleSheet.create({
   },
   disabledArrow: {
     color: '#CCCCCC',
+  },
+  addGroupOption: {
+    borderStyle: 'dashed',
+    borderColor: '#8B7355',
+    backgroundColor: 'rgba(139, 115, 85, 0.05)',
+  },
+  addGroupText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 16,
+    lineHeight: 24,
+    color: '#8B7355',
+    letterSpacing: 0.1,
+  },
+  inputContainer: {
+    marginBottom: 20,
+  },
+  inputLabel: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 14,
+    lineHeight: 20,
+    color: '#2D2D2D',
+    marginBottom: 8,
+    letterSpacing: 0.1,
+  },
+  textInput: {
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 16,
+    lineHeight: 24,
+    color: '#2D2D2D',
+    backgroundColor: '#FEFEFE',
+  },
+  modalActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginTop: 24,
+  },
+  modalCancelButton: {
+    flex: 1,
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: '#8B7355',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+  },
+  modalCancelText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 16,
+    lineHeight: 20,
+    color: '#8B7355',
+    textAlign: 'center',
+    letterSpacing: 0.2,
+  },
+  modalConfirmButtonDisabled: {
+    backgroundColor: '#CCCCCC',
+    borderColor: '#CCCCCC',
+  },
+
+  // Recipe Section Styles
+  recipeSection: {
+    marginBottom: 32,
+  },
+  recipeTitle: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 18,
+    lineHeight: 24,
+    color: '#2D2D2D',
+    marginBottom: 16,
+    letterSpacing: 0.1,
+  },
+  recipeOptions: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  recipeOption: {
+    flex: 1,
+    backgroundColor: '#F8F6F3',
+    borderRadius: 12,
+    paddingVertical: 16,
+    paddingHorizontal: 12,
+    borderWidth: 2,
+    borderColor: 'transparent',
+    alignItems: 'center',
+  },
+  recipeOptionSelected: {
+    borderColor: '#8B7355',
+    backgroundColor: 'rgba(139, 115, 85, 0.1)',
+  },
+  recipeOptionText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 14,
+    lineHeight: 20,
+    color: '#2D2D2D',
+    letterSpacing: 0.1,
+  },
+  recipeOptionTextSelected: {
+    color: '#8B7355',
+    fontFamily: 'Inter_600SemiBold',
+  },
+
+  // Conflict Modal Styles
+  conflictModalContainer: {
+    minHeight: 200,
+    paddingVertical: 32,
+    paddingHorizontal: 24,
+  },
+  conflictModalTitle: {
+    fontFamily: 'PlayfairDisplay_700Bold',
+    fontSize: 24,
+    lineHeight: 32,
+    color: '#C5483D',
+    textAlign: 'center',
+    marginBottom: 16,
+    letterSpacing: 0.3,
+  },
+  conflictModalMessage: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 16,
+    lineHeight: 24,
+    color: '#2D2D2D',
+    textAlign: 'center',
+    marginBottom: 32,
+    letterSpacing: 0.1,
+  },
+  conflictModalButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  conflictCancelButton: {
+    flex: 1,
+    backgroundColor: 'transparent',
+    borderWidth: 2,
+    borderColor: '#E0E0E0',
+    borderRadius: 12,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    alignItems: 'center',
+  },
+  conflictCancelText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 16,
+    lineHeight: 20,
+    color: '#6B6B6B',
+    letterSpacing: 0.2,
+  },
+  conflictConfirmButton: {
+    flex: 1,
+    backgroundColor: '#C5483D',
+    borderRadius: 12,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    alignItems: 'center',
+    shadowColor: '#C5483D',
+    shadowOffset: {
+      width: 0,
+      height: 3,
+    },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  conflictConfirmText: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 16,
+    lineHeight: 20,
+    color: '#FEFEFE',
+    letterSpacing: 0.2,
   },
 }); 

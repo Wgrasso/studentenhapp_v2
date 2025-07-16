@@ -20,10 +20,25 @@ const SafeDrawing = ({ source, style, resizeMode = "contain" }) => {
 };
 
 export default function VotingScreen({ route, navigation }) {
-  const { requestId, groupName, groupId, preloadedMealOptions } = route.params;
+  const { requestId, groupName, groupId, preloadedMealOptions, returnToGroupModal } = route.params;
   
   // Debug route params
-  console.log('🔍 [VOTING] Route params:', { requestId, groupName, groupId, preloadedMealOptions: preloadedMealOptions?.length });
+  console.log('🔍 [VOTING] Route params:', { requestId, groupName, groupId, preloadedMealOptions: preloadedMealOptions?.length, returnToGroupModal });
+  
+  // Custom back navigation function
+  const handleBackNavigation = () => {
+    if (returnToGroupModal) {
+      // Navigate back to MainTabs with parameters to reopen group modal
+      navigation.navigate('MainTabs', {
+        switchToGroupsTab: true,
+        reopenGroupModal: true,
+        groupId: groupId
+      });
+    } else {
+      // Standard back navigation
+      navigation.goBack();
+    }
+  };
   
   // Simple state management
   const [loading, setLoading] = useState(true);
@@ -92,7 +107,7 @@ export default function VotingScreen({ route, navigation }) {
             return;
           }
           
-          navigation.goBack();
+          handleBackNavigation();
           return;
         }
       }
@@ -137,7 +152,7 @@ export default function VotingScreen({ route, navigation }) {
         return;
       }
       
-      navigation.goBack();
+      handleBackNavigation();
     } finally {
       setLoading(false);
     }
@@ -193,7 +208,7 @@ export default function VotingScreen({ route, navigation }) {
           
           <TouchableOpacity 
             style={styles.backToGroupButton}
-            onPress={() => navigation.goBack()}
+            onPress={() => handleBackNavigation()}
           >
             <Text style={styles.backToGroupButtonText}>← Back to Group</Text>
           </TouchableOpacity>
@@ -220,7 +235,7 @@ export default function VotingScreen({ route, navigation }) {
       
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={() => navigation.goBack()}>
+        <TouchableOpacity style={styles.backButton} onPress={() => handleBackNavigation()}>
           <Text style={styles.backArrow}>←</Text>
           <Text style={styles.backText}>Back</Text>
         </TouchableOpacity>

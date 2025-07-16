@@ -3,7 +3,7 @@ import { StyleSheet, Text, View, SafeAreaView, ScrollView, TouchableOpacity, Tex
 import Slider from '@react-native-community/slider';
 import { createGroupInSupabase, joinGroupByCode, getUserGroups, leaveGroup, deleteGroup, getGroupMembers } from '../lib/groupsService';
 import { getMealOptions } from '../lib/mealRequestService';
-import { getActiveMealRequest, createMealRequest, debugGetActiveRequests, debugCompleteAllActiveRequests, completeMealRequest, getTopVotedMeals } from '../lib/mealRequestService';
+import { getActiveMealRequest, createMealRequest, debugGetActiveRequests, debugCompleteAllActiveRequests, completeMealRequest, getTopVotedMeals, getUserVotingProgress } from '../lib/mealRequestService';
 import { getGroupMemberResponses, getAllDinnerRequests, recordUserResponse, createMealFromRequest, completeDinnerRequest } from '../lib/dinnerRequestService';
 import { ensureUserProfile } from '../lib/profileService';
 import { terminatedSessionsService } from '../lib/terminatedSessionsService';
@@ -330,6 +330,7 @@ export default function GroupsScreen({ route, navigation }) {
   
   // State for storing terminated session results (top 3 meals) - persistent per group
   const [terminatedSessionResults, setTerminatedSessionResults] = useState(new Map()); // groupId -> results
+  const [userVotingComplete, setUserVotingComplete] = useState(new Map()); // groupId -> boolean
   
   // Local state for instant button display when user clicks YES (optimistic UI)
   const [userLocallyAcceptedRequest, setUserLocallyAcceptedRequest] = useState(false);
@@ -381,6 +382,28 @@ export default function GroupsScreen({ route, navigation }) {
     const unsubscribe = navigation.addListener('focus', () => {
       console.log('🎯 Groups screen focused');
       
+      // Check if we're returning from voting and should reopen the group modal
+      if (route.params?.reopenGroupModal && route.params?.groupId) {
+        console.log('🔄 Reopening group modal after voting for group:', route.params.groupId);
+        
+        // Find the group and reopen the modal
+        const group = groups.find(g => g.group_id === route.params.groupId);
+        if (group) {
+          setTimeout(() => {
+            handleGroupPress(group);
+          }, 100);
+        }
+        
+        // Clear the parameters via the parent navigation
+        if (navigation.setParams) {
+          navigation.setParams({ 
+            switchToGroupsTab: undefined,
+            reopenGroupModal: undefined, 
+            groupId: undefined 
+          });
+        }
+      }
+      
       // Only refresh if user is authenticated and not already loading  
       if (!isGuest && !isLoadingRef.current) {
         console.log('🔄 Refreshing groups on screen focus');
@@ -389,7 +412,17 @@ export default function GroupsScreen({ route, navigation }) {
     });
 
     return unsubscribe;
-  }, [navigation]); // Only navigation dependency to prevent re-registration
+  }, [navigation, groups]); // Added groups dependency to access current groups
+
+  // Ensure terminated sessions are loaded whenever groups change
+  useEffect(() => {
+    if (groups.length > 0) {
+      console.log('📊 Groups updated, ensuring terminated sessions are loaded');
+      setTimeout(() => {
+        loadTerminatedSessions(groups);
+      }, 300); // Small delay to ensure groups state is stable
+    }
+  }, [groups.length]); // Only trigger when the number of groups changes
 
   // Listen for refresh parameter changes from other screens
   useEffect(() => {
@@ -499,17 +532,47 @@ export default function GroupsScreen({ route, navigation }) {
     };
   }, []);
 
+  // Check if user has completed voting for a group
+  const checkUserVotingComplete = async (groupId, requestId) => {
+    try {
+      if (!requestId) return false;
+      
+      const progressResult = await getUserVotingProgress(requestId);
+      if (progressResult.success) {
+        setUserVotingComplete(prev => {
+          const newMap = new Map(prev);
+          newMap.set(groupId, progressResult.progress.isComplete);
+          return newMap;
+        });
+        return progressResult.progress.isComplete;
+      }
+      return false;
+    } catch (error) {
+      console.error('Error checking voting progress:', error);
+      return false;
+    }
+  };
+
   // Load terminated sessions from database
-  const loadTerminatedSessions = async () => {
+  const loadTerminatedSessions = async (groupsToLoad = null) => {
     try {
       console.log('🔄 Loading terminated sessions from database...');
-      const newMap = new Map();
+      const groupsData = groupsToLoad || groups;
+      
+      if (!groupsData || groupsData.length === 0) {
+        console.log('⚠️ No groups available to load terminated sessions');
+        return;
+      }
+      
+      // Don't clear existing terminated sessions - merge with existing
+      const newMap = new Map(terminatedSessionResults);
       
       // Load terminated sessions for all groups
-      for (const group of groups) {
+      for (const group of groupsData) {
         const sessionResult = await terminatedSessionsService.getTerminatedSession(group.group_id);
         
         if (sessionResult.success && sessionResult.data) {
+          console.log(`📊 Found terminated session for group ${group.group_name}:`, sessionResult.data);
           newMap.set(group.group_id, {
             groupId: sessionResult.data.group_id,
             groupName: sessionResult.data.group_name,
@@ -517,11 +580,18 @@ export default function GroupsScreen({ route, navigation }) {
             memberResponses: sessionResult.data.member_responses || [],
             terminatedAt: sessionResult.data.terminated_at
           });
+        } else {
+          console.log(`📊 No terminated session found for group ${group.group_name}`);
         }
       }
       
       setTerminatedSessionResults(newMap);
-      console.log('✅ Loaded terminated sessions from database:', newMap);
+      console.log('✅ Loaded terminated sessions from database. Total sessions:', newMap.size);
+      
+      // Log what we loaded
+      newMap.forEach((session, groupId) => {
+        console.log(`📊 Session for ${session.groupName}: ${session.results.length} results, ${session.memberResponses.length} responses`);
+      });
     } catch (error) {
       console.error('❌ Error loading terminated sessions:', error);
     }
@@ -656,9 +726,10 @@ export default function GroupsScreen({ route, navigation }) {
         setGroups(groupsWithMealRequests);
         
         // Load terminated sessions after groups are loaded
+        // Pass the groups data directly to avoid timing issues
         setTimeout(() => {
-          loadTerminatedSessions();
-        }, 100); // Small delay to ensure groups state is updated
+          loadTerminatedSessions(groupsWithMealRequests);
+        }, 200); // Increased delay to ensure state is updated
       } else {
         // Don't show error popup - just log and handle gracefully
         console.log('ℹ️ Could not load groups:', result?.error || 'Unknown error');
@@ -1471,6 +1542,12 @@ export default function GroupsScreen({ route, navigation }) {
     // Reset local acceptance state when opening a different group
     setUserLocallyAcceptedRequest(false);
     
+    // Check if user has completed voting for this group
+    if (cleanGroup.activeMealRequest?.request_id || cleanGroup.activeMealRequest?.id) {
+      const requestId = cleanGroup.activeMealRequest?.request_id || cleanGroup.activeMealRequest?.id;
+      checkUserVotingComplete(cleanGroup.group_id, requestId);
+    }
+    
     Animated.spring(groupDetailAnimation, {
       toValue: 1,
       useNativeDriver: true,
@@ -1610,7 +1687,7 @@ export default function GroupsScreen({ route, navigation }) {
       return false;
     }
     
-    const userResponse = selectedGroup.dinnerRequestResponses.find(r => r.userId === currentUserId);
+    const userResponse = selectedGroup?.dinnerRequestResponses?.find(r => r.userId === currentUserId);
     const accepted = userResponse?.response === 'accepted';
     
     console.log('📋 [USER RESPONSE CHECK] Current user:', currentUserId);
@@ -1722,7 +1799,7 @@ export default function GroupsScreen({ route, navigation }) {
           console.log('✅ [GROUP PAGE] User accepted - showing voting buttons immediately');
           
           // Update current user's response in the dinnerRequestResponses
-          const updatedResponses = selectedGroup.dinnerRequestResponses ? [...selectedGroup.dinnerRequestResponses] : [];
+          const updatedResponses = selectedGroup?.dinnerRequestResponses ? [...selectedGroup.dinnerRequestResponses] : [];
           const userResponseIndex = updatedResponses.findIndex(r => r.userId === currentUserId);
           
           if (userResponseIndex >= 0) {
@@ -2123,6 +2200,7 @@ export default function GroupsScreen({ route, navigation }) {
           });
           
           // STEP 6: Update local terminated sessions state for immediate display
+          console.log('📊 Updating local terminated sessions state for immediate display');
           setTerminatedSessionResults(prev => {
             const newMap = new Map(prev);
             newMap.set(selectedGroup.group_id, {
@@ -2132,12 +2210,15 @@ export default function GroupsScreen({ route, navigation }) {
               memberResponses: finalMemberResponses,
               terminatedAt: new Date().toISOString()
             });
+            console.log('📊 Local terminated sessions updated:', newMap);
             return newMap;
           });
           
           // STEP 7: Wait longer before server refresh to ensure database updates complete
+          // The terminated sessions should persist because they're now in the database
           setTimeout(() => {
-            console.log('🔄 Performing delayed server refresh...');
+            console.log('🔄 Performing delayed server refresh after termination...');
+            console.log('📊 Current terminated sessions before refresh:', terminatedSessionResults.size);
             loadUserGroups();
           }, 3000); // Increased delay to allow database updates to complete
           
@@ -2639,7 +2720,43 @@ export default function GroupsScreen({ route, navigation }) {
                 <Text style={styles.backText}>Back</Text>
               </TouchableOpacity>
               <Text style={styles.headerGroupName}>{selectedGroup?.group_name}</Text>
-              <Text style={styles.headerMemberCount}>({selectedGroup?.member_count} Members)</Text>
+              
+              {/* Request Meal Button or Member Count */}
+              {(() => {
+                const hasActiveDinnerRequest = selectedGroup?.hasActiveDinnerRequest;
+                const hasActiveMealRequest = selectedGroup?.hasActiveMealRequest;
+                const showRequestMealButton = !hasActiveDinnerRequest && !hasActiveMealRequest;
+                
+                return showRequestMealButton ? (
+                  <TouchableOpacity 
+                    style={styles.headerRequestMealButton}
+                    onPress={() => {
+                      console.log('📍 Request Meal button pressed for group:', selectedGroup?.group_name);
+                      console.log('📍 Navigating to MainProfileScreen with pre-selected group');
+                      
+                      // Close the modal
+                      hideGroupDetailModal();
+                      
+                      // Navigate to MainProfileScreen with the group pre-selected
+                      if (navigation && navigation.navigate) {
+                        navigation.navigate('Profile', {
+                          preSelectedGroup: {
+                            group_id: selectedGroup?.group_id,
+                            group_name: selectedGroup?.group_name,
+                            member_count: selectedGroup?.member_count
+                          }
+                        });
+                      } else {
+                        console.log('💡 Navigation not available, please navigate to Profile tab manually');
+                      }
+                    }}
+                  >
+                    <Text style={styles.headerRequestMealButtonText}>Request Meal</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <Text style={styles.headerMemberCount}>({selectedGroup?.member_count} Members)</Text>
+                );
+              })()}
             </View>
 
             {/* Modal Content */}
@@ -2687,7 +2804,7 @@ export default function GroupsScreen({ route, navigation }) {
                   )}
 
                   {/* Action Buttons - Show INSTANTLY when user clicks YES (optimistic UI) */}
-                  {(() => {
+                  {selectedGroup && (() => {
                     console.log('📋 [RENDER DEBUG] Checking voting buttons for:', selectedGroup?.group_name);
                     
                     // INSTANT BUTTON DISPLAY: Show buttons immediately if user clicked YES locally
@@ -2710,13 +2827,14 @@ export default function GroupsScreen({ route, navigation }) {
                     <View style={styles.groupModalActions}>
                       <Text style={styles.activeSectionTitle}>Active Voting Session</Text>
                       
-                      {/* Vote Button */}
-                      <TouchableOpacity 
-                        style={styles.voteButtonNew}
-                        onPress={() => {
-                          const requestId = selectedGroup.activeMealRequest?.request_id || selectedGroup.activeMealRequest?.id;
+                      {/* Vote Button - Only show if user hasn't completed voting */}
+                      {selectedGroup && !userVotingComplete.get(selectedGroup?.group_id) && (
+                        <TouchableOpacity 
+                          style={styles.voteButtonNew}
+                          onPress={() => {
+                          const requestId = selectedGroup?.activeMealRequest?.request_id || selectedGroup?.activeMealRequest?.id;
                           console.log('🗳️ Navigating to voting screen for request:', requestId);
-                          console.log('🔍 Full activeMealRequest:', selectedGroup.activeMealRequest);
+                          console.log('🔍 Full activeMealRequest:', selectedGroup?.activeMealRequest);
                           
                           if (!requestId) {
                             console.error('❌ No request ID found in activeMealRequest');
@@ -2725,14 +2843,15 @@ export default function GroupsScreen({ route, navigation }) {
                           }
                           
                           // If we have preloaded meals, transition instantly
-                          if (selectedGroup.activeMealRequest?.preloadedForVoting) {
+                          if (selectedGroup?.activeMealRequest?.preloadedForVoting) {
                             console.log('✨ Using preloaded meals for instant voting transition');
                             hideGroupDetailModal();
                             navigation.navigate('VotingScreen', {
                               requestId: requestId,
-                              groupName: selectedGroup.group_name,
-                              groupId: selectedGroup.group_id,
-                              preloadedMealOptions: selectedGroup.activeMealRequest?.mealOptions || []
+                              groupName: selectedGroup?.group_name,
+                              groupId: selectedGroup?.group_id,
+                              preloadedMealOptions: selectedGroup?.activeMealRequest?.mealOptions || [],
+                              returnToGroupModal: true // Flag to indicate we should return to group modal
                             });
                           } else {
                             // Show loading state and fetch meals if not preloaded
@@ -2747,9 +2866,10 @@ export default function GroupsScreen({ route, navigation }) {
                                   hideGroupDetailModal();
                                   navigation.navigate('VotingScreen', {
                                     requestId: requestId,
-                                    groupName: selectedGroup.group_name,
-                                    groupId: selectedGroup.group_id,
-                                    preloadedMealOptions: result.options || []
+                                    groupName: selectedGroup?.group_name,
+                                    groupId: selectedGroup?.group_id,
+                                    preloadedMealOptions: result.options || [],
+                                    returnToGroupModal: true // Flag to indicate we should return to group modal
                                   });
                                 } else {
                                   showAlert('Error', 'Failed to load meal options. Please try again.', 'OK');
@@ -2764,12 +2884,13 @@ export default function GroupsScreen({ route, navigation }) {
                       >
                         <Text style={styles.voteButtonTextNew}>Vote</Text>
                       </TouchableOpacity>
+                      )}
                       
                       {/* Reveal Results Button */}
                       <TouchableOpacity 
                         style={styles.revealButtonNew}
                         onPress={() => {
-                          const requestId = selectedGroup.activeMealRequest?.request_id || selectedGroup.activeMealRequest?.id;
+                          const requestId = selectedGroup?.activeMealRequest?.request_id || selectedGroup?.activeMealRequest?.id;
                           
                           if (!requestId) {
                             console.error('❌ No request ID found for results');
@@ -2780,8 +2901,9 @@ export default function GroupsScreen({ route, navigation }) {
                           hideGroupDetailModal();
                           navigation.navigate('ResultsScreen', {
                             requestId: requestId,
-                            groupName: selectedGroup.group_name,
-                            groupId: selectedGroup.group_id
+                            groupName: selectedGroup?.group_name,
+                            groupId: selectedGroup?.group_id,
+                            returnToGroupModal: true // Flag to indicate we should return to group modal
                           });
                         }}
                       >
@@ -2867,9 +2989,9 @@ export default function GroupsScreen({ route, navigation }) {
                     )}
 
                     {/* Terminated Session Results - Show Top 3 Meals + Member Responses */}
-                    {(() => {
-                      const groupResults = terminatedSessionResults.get(selectedGroup.group_id);
-                      console.log('🔍 [RESULTS DEBUG] Group ID:', selectedGroup.group_id);
+                    {selectedGroup && (() => {
+                      const groupResults = terminatedSessionResults.get(selectedGroup?.group_id);
+                      console.log('🔍 [RESULTS DEBUG] Group ID:', selectedGroup?.group_id);
                       console.log('🔍 [RESULTS DEBUG] Terminated results map:', terminatedSessionResults);
                       console.log('🔍 [RESULTS DEBUG] Group results:', groupResults);
                       
@@ -2946,20 +3068,31 @@ export default function GroupsScreen({ route, navigation }) {
                           <TouchableOpacity 
                             style={styles.clearResultsButton}
                             onPress={async () => {
-                              console.log('🧹 Clearing all results for group:', selectedGroup.group_name);
+                              console.log('🧹 Clearing all results for group:', selectedGroup?.group_name);
+                              console.log('🧹 Current terminated sessions before clear:', terminatedSessionResults.size);
                               
                               // Clear from database
-                              const clearResult = await terminatedSessionsService.clearTerminatedSession(selectedGroup.group_id);
+                              const clearResult = await terminatedSessionsService.clearTerminatedSession(selectedGroup?.group_id);
                               
                               if (clearResult.success) {
                                 // Clear from local state
                                 setTerminatedSessionResults(prev => {
                                   const newMap = new Map(prev);
-                                  newMap.delete(selectedGroup.group_id);
+                                  newMap.delete(selectedGroup?.group_id);
+                                  console.log('🧹 Terminated sessions after clear:', newMap.size);
                                   return newMap;
                                 });
                                 
-                                console.log('✅ Successfully cleared results for group:', selectedGroup.group_name);
+                                // Also clear any terminated session markers from group state
+                                if (selectedGroup?._terminatedSession) {
+                                  setSelectedGroup(prev => ({
+                                    ...prev,
+                                    _terminatedSession: false,
+                                    _terminatedAt: null
+                                  }));
+                                }
+                                
+                                console.log('✅ Successfully cleared results for group:', selectedGroup?.group_name);
                               } else {
                                 console.error('❌ Failed to clear results:', clearResult.error);
                                 showAlert(
@@ -2979,44 +3112,7 @@ export default function GroupsScreen({ route, navigation }) {
                 </View>
               )}
 
-              {/* Request Meal Button - Only show when no active voting session - BOTTOM OF MODAL */}
-              {(() => {
-                const hasActiveDinnerRequest = selectedGroup?.hasActiveDinnerRequest;
-                const hasActiveMealRequest = selectedGroup?.hasActiveMealRequest;
-                const showRequestMealButton = !hasActiveDinnerRequest && !hasActiveMealRequest;
-                
-                return showRequestMealButton && (
-                  <View style={styles.requestMealSection}>
-                    <TouchableOpacity 
-                      style={styles.requestMealButtonNew}
-                      onPress={() => {
-                        console.log('📍 Request Meal button pressed for group:', selectedGroup.group_name);
-                        console.log('📍 Navigating to MainProfileScreen with pre-selected group');
-                        
-                        // Close the modal
-                        hideGroupDetailModal();
-                        
-                        // Navigate to MainProfileScreen with the group pre-selected
-                        // Use the enhanced navigation from MainTabNavigator
-                        if (navigation && navigation.navigate) {
-                          // Navigate to profile tab with pre-selected group
-                          navigation.navigate('Profile', {
-                            preSelectedGroup: {
-                              group_id: selectedGroup.group_id,
-                              group_name: selectedGroup.group_name,
-                              member_count: selectedGroup.member_count
-                            }
-                          });
-                        } else {
-                          console.log('💡 Navigation not available, please navigate to Profile tab manually');
-                        }
-                      }}
-                    >
-                      <Text style={styles.requestMealButtonTextNew}>Request Meal</Text>
-                    </TouchableOpacity>
-                  </View>
-                );
-              })()}
+
             </ScrollView>
               </Animated.View>
 

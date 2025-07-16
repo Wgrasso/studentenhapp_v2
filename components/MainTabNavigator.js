@@ -39,6 +39,17 @@ export default function MainTabNavigator({ navigation, route }) {
       const guestStatus = route.params.params.isGuest;
       setIsGuest(guestStatus);
     }
+    
+    // Handle switching to groups tab and reopening group modal
+    if (route?.params?.switchToGroupsTab) {
+      console.log('🔄 Switching to groups tab and reopening modal');
+      setCurrentTab('groups');
+      
+      // Ensure groups tab is loaded
+      if (!loadedTabs.groups) {
+        setLoadedTabs(prev => ({ ...prev, groups: true }));
+      }
+    }
   }, [route?.params]);
 
   const preloadImages = async () => {
@@ -193,6 +204,8 @@ export default function MainTabNavigator({ navigation, route }) {
     ...navigation,
     navigate: (routeName, params) => {
       if (routeName === 'Profile') {
+        // Set current tab to profile and pass through parameters
+        setCurrentTab('profile');
         navigation.navigate('Profile', params);
       } else if (routeName === 'SignIn') {
         // Use cached SignIn screen for instant loading
@@ -295,7 +308,13 @@ export default function MainTabNavigator({ navigation, route }) {
           {loadedTabs.groups && (
             <GroupsScreen 
               key={`groups-${isGuest}`}
-              route={{ params: { isGuest } }} 
+              route={{ 
+                params: { 
+                  isGuest,
+                  reopenGroupModal: route?.params?.reopenGroupModal,
+                  groupId: route?.params?.groupId
+                } 
+              }} 
               navigation={enhancedNavigation}
               hideBottomNav={true}
             />

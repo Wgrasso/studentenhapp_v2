@@ -18,7 +18,22 @@ const SafeDrawing = ({ source, style, resizeMode = "contain" }) => {
 };
 
 export default function ResultsScreen({ route, navigation }) {
-  const { requestId, groupName, groupId } = route.params;
+  const { requestId, groupName, groupId, returnToGroupModal } = route.params;
+  
+  // Custom back navigation function
+  const handleBackNavigation = () => {
+    if (returnToGroupModal) {
+      // Navigate back to MainTabs with parameters to reopen group modal
+      navigation.navigate('MainTabs', {
+        switchToGroupsTab: true,
+        reopenGroupModal: true,
+        groupId: groupId
+      });
+    } else {
+      // Standard back navigation
+      navigation.goBack();
+    }
+  };
   
   // State management
   const [loading, setLoading] = useState(true);
@@ -117,7 +132,7 @@ export default function ResultsScreen({ route, navigation }) {
           
           <TouchableOpacity 
             style={styles.backButton}
-            onPress={() => navigation.goBack()}
+            onPress={() => handleBackNavigation()}
           >
             <Text style={styles.backButtonText}>← Back to Group</Text>
           </TouchableOpacity>
@@ -144,7 +159,7 @@ export default function ResultsScreen({ route, navigation }) {
       
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity style={styles.headerBackButton} onPress={() => navigation.goBack()}>
+        <TouchableOpacity style={styles.headerBackButton} onPress={() => handleBackNavigation()}>
           <Text style={styles.backArrow}>←</Text>
           <Text style={styles.backText}>Back</Text>
         </TouchableOpacity>

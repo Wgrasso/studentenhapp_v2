@@ -31,6 +31,10 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
     dietaryRestrictions: []
   });
   
+  // Tab and wishlist states
+  const [activeTab, setActiveTab] = useState('meals'); // 'meals' or 'wishlist'
+  const [wishlist, setWishlist] = useState([]); // Array of saved recipes
+  
   // Modal states
   const [selectedRecipe, setSelectedRecipe] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
@@ -410,6 +414,31 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
     }
   };
 
+  // Wishlist management functions
+  const addToWishlist = (recipe) => {
+    if (!isRecipeInWishlist(recipe.id)) {
+      setWishlist(prev => [...prev, recipe]);
+      // TODO: Save to AsyncStorage or database for persistence
+    }
+  };
+
+  const removeFromWishlist = (recipeId) => {
+    setWishlist(prev => prev.filter(recipe => recipe.id !== recipeId));
+    // TODO: Remove from AsyncStorage or database
+  };
+
+  const isRecipeInWishlist = (recipeId) => {
+    return wishlist.some(recipe => recipe.id === recipeId);
+  };
+
+  const toggleWishlist = (recipe) => {
+    if (isRecipeInWishlist(recipe.id)) {
+      removeFromWishlist(recipe.id);
+    } else {
+      addToWishlist(recipe);
+    }
+  };
+
   // Transform meals from API format to recipe format
   const transformMealsToRecipes = (meals) => {
     return meals.map(recipe => {
@@ -555,88 +584,210 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
       >
         {/* Header */}
         <View style={styles.header}>
-                          <Text style={styles.title}>Today's Inspiration</Text>
-          <Text style={styles.dateText}>{getCurrentDate()}</Text>
-
-        </View>
-
-        {/* Recipe Grid */}
-        <View style={styles.recipesContainer}>
-          <Text style={styles.sectionTitle}>Featured Recipes</Text>
-
-          
-          {recipes.map((recipe) => (
+          <View style={styles.tabContainer}>
             <TouchableOpacity 
-              key={recipe.id} 
-              style={styles.recipeCard}
-              onPress={() => openRecipe(recipe)}
-              activeOpacity={0.9}
+              style={[styles.tab, activeTab === 'meals' && styles.activeTab]}
+              onPress={() => setActiveTab('meals')}
             >
-              <Image 
-                source={{ uri: recipe.image }} 
-                style={styles.recipeImage}
-                resizeMode="cover"
-              />
-              
-              <View style={styles.recipeContent}>
-                <View style={styles.recipeHeader}>
-                  <Text style={styles.recipeTitle}>{recipe.title}</Text>
-                  <View style={styles.recipeMetrics}>
-                    <View style={styles.timeContainer}>
-                      <Text style={styles.timeText}>{formatTime(recipe.readyInMinutes)}</Text>
-                    </View>
-                    <View style={[styles.difficultyContainer, { backgroundColor: getDifficultyColor(recipe.difficulty) }]}>
-                      <Text style={styles.difficultyText}>{recipe.difficulty}</Text>
-                    </View>
-                  </View>
-                </View>
-                
-                <Text style={styles.recipeDescription}>{recipe.description}</Text>
-                
-                {recipe.dietary.length > 0 && (
-                  <View style={styles.dietaryTags}>
-                    {recipe.dietary.slice(0, 2).map((dietary, index) => (
-                      <View key={index} style={styles.dietaryTag}>
-                        <Text style={styles.dietaryTagText}>{dietary}</Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
-              </View>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        {/* Bottom Action */}
-        <View style={styles.bottomAction}>
-          <TouchableOpacity 
-            style={[styles.moreRecipesButton, loadingMore && styles.buttonDisabled]}
-            onPress={refreshRecipes}
-            disabled={loadingMore}
-          >
-            {loadingMore ? (
-              <ActivityIndicator size="small" color="#FEFEFE" />
-            ) : (
-              <Text style={styles.moreRecipesButtonText}>
-                {displayedCount >= allLoadedRecipes.length ? 
-                  'Discover New Recipes' : 
-                  `Show More (${Math.min(20, allLoadedRecipes.length - displayedCount)} more available)`
-                }
-              </Text>
-            )}
-          </TouchableOpacity>
-          
-          {isGuest && (
-            <TouchableOpacity 
-              style={styles.signInPrompt}
-              onPress={() => navigation.navigate('SignIn')}
-            >
-              <Text style={styles.signInPromptText}>
-                Sign in for personalized recommendations
+              <Text style={[styles.tabText, activeTab === 'meals' && styles.activeTabText]}>
+                Meals
               </Text>
             </TouchableOpacity>
+            
+            <TouchableOpacity 
+              style={[styles.tab, activeTab === 'wishlist' && styles.activeTab]}
+              onPress={() => setActiveTab('wishlist')}
+            >
+              <Text style={[styles.tabText, activeTab === 'wishlist' && styles.activeTabText]}>
+                Wishlist
+              </Text>
+            </TouchableOpacity>
+          </View>
+          
+          {activeTab === 'meals' && (
+            <Text style={styles.dateText}>{getCurrentDate()}</Text>
+          )}
+          
+          {activeTab === 'wishlist' && (
+            <Text style={styles.dateText}>
+              {wishlist.length} recipe{wishlist.length !== 1 ? 's' : ''} saved
+            </Text>
           )}
         </View>
+
+        {/* Content based on active tab */}
+        {activeTab === 'meals' ? (
+          <View style={styles.recipesContainer}>
+            <Text style={styles.sectionTitle}>Featured Recipes</Text>
+
+            {recipes.map((recipe) => (
+              <TouchableOpacity 
+                key={recipe.id} 
+                style={styles.recipeCard}
+                onPress={() => openRecipe(recipe)}
+                activeOpacity={0.9}
+              >
+                <Image 
+                  source={{ uri: recipe.image }} 
+                  style={styles.recipeImage}
+                  resizeMode="cover"
+                />
+                
+                <View style={styles.recipeContent}>
+                  <View style={styles.recipeHeader}>
+                    <Text style={styles.recipeTitle}>{recipe.title}</Text>
+                    <View style={styles.recipeMetrics}>
+                      <TouchableOpacity 
+                        style={styles.wishlistButton}
+                        onPress={() => toggleWishlist(recipe)}
+                      >
+                        <Text style={styles.wishlistIcon}>
+                          {isRecipeInWishlist(recipe.id) ? '❤️' : '🤍'}
+                        </Text>
+                      </TouchableOpacity>
+                      <View style={styles.timeContainer}>
+                        <Text style={styles.timeText}>{formatTime(recipe.readyInMinutes)}</Text>
+                      </View>
+                      <View style={[styles.difficultyContainer, { backgroundColor: getDifficultyColor(recipe.difficulty) }]}>
+                        <Text style={styles.difficultyText}>{recipe.difficulty}</Text>
+                      </View>
+                    </View>
+                  </View>
+                  
+                  <Text style={styles.recipeDescription}>{recipe.description}</Text>
+                  
+                  {recipe.dietary.length > 0 && (
+                    <View style={styles.dietaryTags}>
+                      {recipe.dietary.slice(0, 2).map((dietary, index) => (
+                        <View key={index} style={styles.dietaryTag}>
+                          <Text style={styles.dietaryTagText}>{dietary}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+                </View>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : (
+          <View style={styles.recipesContainer}>
+            <Text style={styles.sectionTitle}>Your Wishlist</Text>
+            
+            {wishlist.length === 0 ? (
+              <View style={styles.emptyWishlist}>
+                <Text style={styles.emptyWishlistIcon}>🤍</Text>
+                <Text style={styles.emptyWishlistTitle}>No saved recipes yet</Text>
+                <Text style={styles.emptyWishlistText}>
+                  Switch to the Meals tab and tap the heart icon on recipes you'd like to save
+                </Text>
+              </View>
+            ) : (
+              wishlist.map((recipe) => (
+                <TouchableOpacity 
+                  key={recipe.id} 
+                  style={styles.recipeCard}
+                  onPress={() => openRecipe(recipe)}
+                  activeOpacity={0.9}
+                >
+                  <Image 
+                    source={{ uri: recipe.image }} 
+                    style={styles.recipeImage}
+                    resizeMode="cover"
+                  />
+                  
+                  <View style={styles.recipeContent}>
+                    <View style={styles.recipeHeader}>
+                      <Text style={styles.recipeTitle}>{recipe.title}</Text>
+                      <View style={styles.recipeMetrics}>
+                        <TouchableOpacity 
+                          style={styles.wishlistButton}
+                          onPress={() => toggleWishlist(recipe)}
+                        >
+                          <Text style={styles.wishlistIcon}>❤️</Text>
+                        </TouchableOpacity>
+                        <View style={styles.timeContainer}>
+                          <Text style={styles.timeText}>{formatTime(recipe.readyInMinutes)}</Text>
+                        </View>
+                        <View style={[styles.difficultyContainer, { backgroundColor: getDifficultyColor(recipe.difficulty) }]}>
+                          <Text style={styles.difficultyText}>{recipe.difficulty}</Text>
+                        </View>
+                      </View>
+                    </View>
+                    
+                    <Text style={styles.recipeDescription}>{recipe.description}</Text>
+                    
+                    {recipe.dietary.length > 0 && (
+                      <View style={styles.dietaryTags}>
+                        {recipe.dietary.slice(0, 2).map((dietary, index) => (
+                          <View key={index} style={styles.dietaryTag}>
+                            <Text style={styles.dietaryTagText}>{dietary}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                </TouchableOpacity>
+              ))
+            )}
+          </View>
+        )}
+
+        {/* Bottom Action */}
+        {activeTab === 'meals' && (
+          <View style={styles.bottomAction}>
+            <TouchableOpacity 
+              style={[styles.moreRecipesButton, loadingMore && styles.buttonDisabled]}
+              onPress={refreshRecipes}
+              disabled={loadingMore}
+            >
+              {loadingMore ? (
+                <ActivityIndicator size="small" color="#FEFEFE" />
+              ) : (
+                <Text style={styles.moreRecipesButtonText}>
+                  {displayedCount >= allLoadedRecipes.length ? 
+                    'Discover New Recipes' : 
+                    `Show More (${Math.min(20, allLoadedRecipes.length - displayedCount)} more available)`
+                  }
+                </Text>
+              )}
+            </TouchableOpacity>
+            
+            {isGuest && (
+              <TouchableOpacity 
+                style={styles.signInPrompt}
+                onPress={() => navigation.navigate('SignIn')}
+              >
+                <Text style={styles.signInPromptText}>
+                  Sign in for personalized recommendations
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+        
+        {activeTab === 'wishlist' && wishlist.length > 0 && (
+          <View style={styles.bottomAction}>
+            <TouchableOpacity 
+              style={styles.clearWishlistButton}
+              onPress={() => {
+                Alert.alert(
+                  'Clear Wishlist',
+                  'Are you sure you want to remove all recipes from your wishlist?',
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    { 
+                      text: 'Clear', 
+                      style: 'destructive',
+                      onPress: () => setWishlist([])
+                    }
+                  ]
+                );
+              }}
+            >
+              <Text style={styles.clearWishlistButtonText}>Clear Wishlist</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </ScrollView>
 
       {/* Recipe Details Modal */}
@@ -729,6 +880,18 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
 
                     {/* Action Buttons */}
                     <View style={styles.modalActions}>
+                      <TouchableOpacity 
+                        style={styles.modalWishlistButton}
+                        onPress={() => toggleWishlist(selectedRecipe)}
+                      >
+                        <Text style={styles.modalWishlistIcon}>
+                          {selectedRecipe && isRecipeInWishlist(selectedRecipe.id) ? '❤️' : '🤍'}
+                        </Text>
+                        <Text style={styles.modalWishlistText}>
+                          {selectedRecipe && isRecipeInWishlist(selectedRecipe.id) ? 'Remove from Wishlist' : 'Add to Wishlist'}
+                        </Text>
+                      </TouchableOpacity>
+                      
                       <TouchableOpacity style={styles.viewRecipeButton} onPress={openExternalLink}>
                         <Text style={styles.viewRecipeText}>View Full Recipe & Video</Text>
                       </TouchableOpacity>
@@ -1126,5 +1289,115 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     opacity: 0.1,
+  },
+  
+  // Tab styles
+  tabContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#F5F3F0',
+    borderRadius: 8,
+    padding: 4,
+    marginBottom: 16,
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  activeTab: {
+    backgroundColor: '#8B7355',
+    shadowColor: '#8B7355',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  tabText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 16,
+    lineHeight: 20,
+    color: '#6B6B6B',
+    letterSpacing: 0.2,
+  },
+  activeTabText: {
+    color: '#FEFEFE',
+  },
+  
+  // Wishlist styles
+  wishlistButton: {
+    padding: 8,
+    marginRight: 4,
+  },
+  wishlistIcon: {
+    fontSize: 20,
+  },
+  emptyWishlist: {
+    alignItems: 'center',
+    paddingVertical: 60,
+    paddingHorizontal: 32,
+  },
+  emptyWishlistIcon: {
+    fontSize: 48,
+    marginBottom: 16,
+  },
+  emptyWishlistTitle: {
+    fontFamily: 'PlayfairDisplay_700Bold',
+    fontSize: 20,
+    lineHeight: 26,
+    color: '#2D2D2D',
+    marginBottom: 8,
+    textAlign: 'center',
+    letterSpacing: 0.3,
+  },
+  emptyWishlistText: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 14,
+    lineHeight: 20,
+    color: '#6B6B6B',
+    textAlign: 'center',
+    letterSpacing: 0.1,
+  },
+  clearWishlistButton: {
+    backgroundColor: '#F44336',
+    borderRadius: 8,
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+    alignItems: 'center',
+  },
+  clearWishlistButtonText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 16,
+    lineHeight: 24,
+    color: '#FEFEFE',
+    letterSpacing: 0.2,
+  },
+  
+  // Modal wishlist styles
+  modalWishlistButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F5F3F0',
+    borderRadius: 12,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#E8E6E3',
+  },
+  modalWishlistIcon: {
+    fontSize: 20,
+    marginRight: 8,
+  },
+  modalWishlistText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 15,
+    lineHeight: 20,
+    color: '#8B7355',
+    letterSpacing: 0.2,
   },
 }); 

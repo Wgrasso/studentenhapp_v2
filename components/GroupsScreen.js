@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, SafeAreaView, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, Image, Modal, Animated, Clipboard } from 'react-native';
+import { StyleSheet, Text, View, SafeAreaView, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, Image, Modal, Animated, Clipboard, Alert } from 'react-native';
 import Slider from '@react-native-community/slider';
-import { createGroupInSupabase, joinGroupByCode, getUserGroups, leaveGroup, deleteGroup, getGroupMembers } from '../lib/groupsService';
+import { createGroupInSupabase, joinGroupByCode, getUserGroups, leaveGroup, deleteGroup, getGroupMembers, setMainGroup } from '../lib/groupsService';
 import { getMealOptions } from '../lib/mealRequestService';
-import { getActiveMealRequest, createMealRequest, debugGetActiveRequests, debugCompleteAllActiveRequests, completeMealRequest, getTopVotedMeals, getUserVotingProgress } from '../lib/mealRequestService';
+import { getActiveMealRequest, createMealRequest, replaceMealRequest, debugGetActiveRequests, debugCompleteAllActiveRequests, completeMealRequest, getTopVotedMeals, getUserVotingProgress } from '../lib/mealRequestService';
 import { getGroupMemberResponses, getAllDinnerRequests, recordUserResponse, createMealFromRequest, completeDinnerRequest } from '../lib/dinnerRequestService';
 import { ensureUserProfile } from '../lib/profileService';
 import { terminatedSessionsService } from '../lib/terminatedSessionsService';
@@ -312,7 +312,6 @@ export default function GroupsScreen({ route, navigation }) {
   
   // Form state
   const [groupName, setGroupName] = useState('');
-  const [groupDescription, setGroupDescription] = useState('');
   const [joinCode, setJoinCode] = useState('');
   
   // Custom Alert Modal states
@@ -938,14 +937,12 @@ export default function GroupsScreen({ route, navigation }) {
         try {
           setShowCreateModal(false);
           setGroupName('');
-          setGroupDescription('');
           setLoading(false); // Double-check loading state
         } catch (modalError) {
           console.log('⚠️ Error in modal close callback:', modalError);
           // Force reset states
           setShowCreateModal(false);
           setGroupName('');
-          setGroupDescription('');
           setLoading(false);
         }
       });
@@ -954,7 +951,6 @@ export default function GroupsScreen({ route, navigation }) {
       setTimeout(() => {
         setShowCreateModal(false);
         setGroupName('');
-        setGroupDescription('');
         setLoading(false);
       }, 1000);
       
@@ -963,7 +959,6 @@ export default function GroupsScreen({ route, navigation }) {
       // Force reset all states
       setShowCreateModal(false);
       setGroupName('');
-      setGroupDescription('');
       setLoading(false);
     }
   };
@@ -1055,7 +1050,7 @@ export default function GroupsScreen({ route, navigation }) {
       console.log('🏗️ Calling createGroupInSupabase...');
       
       // Use Promise.race to ensure operation doesn't hang indefinitely
-      const createPromise = createGroupInSupabase(groupName, groupDescription);
+      const createPromise = createGroupInSupabase(groupName);
       const timeoutPromise = new Promise((_, reject) => {
         setTimeout(() => reject(new Error('Operation timeout')), 12000);
       });
@@ -1139,7 +1134,6 @@ export default function GroupsScreen({ route, navigation }) {
       showJoinModal,
       alertVisible,
       groupName,
-      groupDescription,
       joinCode,
       alertTitle,
       alertMessage,
@@ -1178,9 +1172,8 @@ export default function GroupsScreen({ route, navigation }) {
       setIsConfirmDialog(false);
       
       // Reset all form data
-      setGroupName('');
-      setGroupDescription('');
-      setJoinCode('');
+          setGroupName('');
+    setJoinCode('');
       
       // Reset alert data
       setAlertTitle('');
@@ -1438,18 +1431,7 @@ export default function GroupsScreen({ route, navigation }) {
               console.log('⚠️ Groups refresh failed (non-critical):', refreshError);
             });
             
-            // Show success message
-            setTimeout(() => {
-              try {
-                showAlert(
-                  'Group Deleted', 
-                  `"${result.group?.name || groupName}" has been deleted successfully.`,
-                  'OK'
-                );
-              } catch (alertError) {
-                console.log('⚠️ Success alert error (non-critical):', alertError);
-              }
-            }, 200); // Small delay to ensure reset is complete
+
             
           } else {
             console.log('❌ Delete group failed:', result?.error);
@@ -1893,8 +1875,15 @@ export default function GroupsScreen({ route, navigation }) {
     }
     
     try {
-      // No confusing intermediate alerts - just show loading state
-      const result = await createMealRequest(selectedGroup.group_id, mealCount);
+      // Add timeout protection to prevent indefinite hanging
+      const requestTimeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(new Error('Meal request creation timeout after 20 seconds'));
+        }, 20000);
+      });
+      
+      const createPromise = createMealRequest(selectedGroup.group_id, mealCount);
+      const result = await Promise.race([createPromise, requestTimeoutPromise]);
       
       if (result.success) {
         console.log('✅ Meal request created successfully');
@@ -1931,6 +1920,41 @@ export default function GroupsScreen({ route, navigation }) {
       } else {
         console.log('❌ Meal request failed:', result.error);
         
+        // Handle existing request found case with simple alert and immediate replacement
+        if (result.error === 'EXISTING_REQUEST_FOUND' && result.existingRequest) {
+          const existingReq = result.existingRequest;
+          const mealCount = existingReq.mealOptions?.length || existingReq.totalOptions || 0;
+          
+          // Simple confirmation without complex modal states
+          console.log('🔄 Active request found, asking user for replacement');
+          
+          // Use React Native's built-in Alert for simplicity
+          Alert.alert(
+            'Active Request Found',
+            `${existingReq.requesterName} created a meal request on ${existingReq.createdDate} at ${existingReq.createdTime} with ${mealCount} meal options.\n\nWould you like to replace it with a new request?`,
+            [
+              {
+                text: 'Cancel',
+                style: 'cancel',
+                onPress: () => {
+                  console.log('❌ User cancelled meal request replacement');
+                  setMealRequestLoading(false);
+                }
+              },
+              {
+                text: 'Replace Request',
+                style: 'destructive',
+                onPress: () => {
+                  console.log('✅ User confirmed meal request replacement');
+                  handleReplaceMealRequest(existingReq.id);
+                }
+              }
+            ],
+            { cancelable: true }
+          );
+          return; // Don't show the regular alert
+        }
+        
         let alertTitle = 'Cannot Create Meal Request';
         let alertMessage = result.error;
         
@@ -1960,10 +1984,90 @@ export default function GroupsScreen({ route, navigation }) {
       
     } catch (error) {
       console.error('❌ Unexpected error creating meal request:', error);
-      showAlert(
+      
+      let errorMessage = 'An unexpected error occurred. Please try again.';
+      if (error.message === 'Meal request creation timeout after 20 seconds') {
+        errorMessage = 'Creating meal request is taking too long. Please check your connection and try again.';
+      }
+      
+      // Use simple Alert instead of custom modal
+      Alert.alert(
         'Error',
-        'An unexpected error occurred. Please try again.',
-        'OK'
+        errorMessage,
+        [{ text: 'OK', style: 'default' }]
+      );
+    } finally {
+      setMealRequestLoading(false);
+    }
+  };
+
+  // Handle replacing an existing meal request
+  const handleReplaceMealRequest = async (existingRequestId) => {
+    if (!selectedGroup) return;
+    
+    console.log('🔄 Replacing meal request for group:', selectedGroup.group_name);
+    setMealRequestLoading(true);
+    
+    // Add timeout protection to prevent freezing
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error('Request replacement timeout after 15 seconds'));
+      }, 15000);
+    });
+    
+    try {
+      const replacePromise = replaceMealRequest(selectedGroup.group_id, mealCount, existingRequestId);
+      const result = await Promise.race([replacePromise, timeoutPromise]);
+      
+      if (result.success) {
+        console.log('✅ Meal request replaced successfully');
+        
+        // Update selected group state immediately to show voting buttons
+        const updatedGroup = {
+          ...selectedGroup,
+          hasActiveMealRequest: true,
+          activeMealRequest: {
+            id: result.request.id,
+            request_id: result.request.id,
+            ...result.request,
+            mealOptions: result.mealOptions || [],
+            preloadedForVoting: true
+          }
+        };
+        
+        setSelectedGroup(updatedGroup);
+        
+        // Refresh groups list in background
+        loadUserGroups();
+        
+        // Show success message using simple Alert
+        Alert.alert(
+          'Request Replaced!',
+          result.message,
+          [{ text: 'OK', style: 'default' }]
+        );
+        
+      } else {
+        console.log('❌ Meal request replacement failed:', result.error);
+        Alert.alert(
+          'Replacement Failed',
+          result.error || 'Failed to replace the meal request. Please try again.',
+          [{ text: 'OK', style: 'default' }]
+        );
+      }
+      
+    } catch (error) {
+      console.error('❌ Unexpected error replacing meal request:', error);
+      
+      let errorMessage = 'An unexpected error occurred while replacing the request.';
+      if (error.message === 'Request replacement timeout after 15 seconds') {
+        errorMessage = 'Request replacement is taking too long. Please try again.';
+      }
+      
+      Alert.alert(
+        'Error',
+        errorMessage,
+        [{ text: 'OK', style: 'default' }]
       );
     } finally {
       setMealRequestLoading(false);
@@ -2408,17 +2512,39 @@ export default function GroupsScreen({ route, navigation }) {
                       <Text style={styles.groupDescription}>{group.group_description}</Text>
                     ) : null}
                   </View>
-                  <View style={[
-                    styles.groupBadge,
-                    (group.hasActiveMealRequest || group.hasActiveDinnerRequest) && styles.activeMealBadge
-                  ]}>
-                    <Text style={styles.groupBadgeText}>
-                                             {group.hasActiveMealRequest 
+                  <View style={styles.groupActions}>
+                    <TouchableOpacity
+                      style={styles.starButton}
+                      onPress={(e) => {
+                        e.stopPropagation(); // Prevent opening detail modal
+                        if (!group.is_main_group) {
+                          withCooldown(async () => {
+                            const result = await setMainGroup(group.group_id);
+                            if (result.success) {
+                              loadUserGroups(); // Reload to update UI
+                            } else {
+                              showAlert('Error', result.error);
+                            }
+                          });
+                        }
+                      }}
+                    >
+                      <Text style={[styles.starIcon, group.is_main_group && styles.starIconActive]}>
+                        ★
+                      </Text>
+                    </TouchableOpacity>
+                    <View style={[
+                      styles.groupBadge,
+                      (group.hasActiveMealRequest || group.hasActiveDinnerRequest) && styles.activeMealBadge
+                    ]}>
+                      <Text style={styles.groupBadgeText}>
+                        {group.hasActiveMealRequest 
                           ? 'Voting' 
                           : group.hasActiveDinnerRequest 
                             ? 'Dinner Request'
                             : (group.is_creator ? 'Admin' : group.user_role)}
-                    </Text>
+                      </Text>
+                    </View>
                   </View>
                 </View>
                 
@@ -2514,19 +2640,7 @@ export default function GroupsScreen({ route, navigation }) {
                 />
               </View>
 
-              <View style={styles.inputContainer}>
-                <Text style={styles.label}>Description (Optional)</Text>
-                <TextInput
-                  style={[styles.input, styles.textArea]}
-                  value={groupDescription}
-                  onChangeText={setGroupDescription}
-                  placeholder="Describe your group's purpose..."
-                  placeholderTextColor="#A0A0A0"
-                  multiline
-                  numberOfLines={3}
-                  maxLength={200}
-                />
-              </View>
+
 
               <View style={styles.modalActions}>
                 <TouchableOpacity style={styles.cancelButton} onPress={hideCreateModal}>
@@ -3484,10 +3598,6 @@ const styles = StyleSheet.create({
     paddingVertical: 16, // Increased from 12 to 16 to prevent text cutoff
     letterSpacing: 0.1,
     minHeight: 48, // Ensure consistent minimum height
-  },
-  textArea: {
-    minHeight: 80,
-    textAlignVertical: 'top',
   },
   modalActions: {
     flexDirection: 'row',
@@ -4992,4 +5102,19 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
  
+  groupActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  starButton: {
+    padding: 4,
+  },
+  starIcon: {
+    fontSize: 24,
+    color: '#D1D1D1',
+  },
+  starIconActive: {
+    color: '#FFD700',
+  },
 }); 

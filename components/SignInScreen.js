@@ -104,7 +104,6 @@ export default function SignInScreen({ navigation }) {
               style={styles.logo}
               resizeMode="contain"
             />
-            <Text style={styles.subtitle}>Welcome back to your student journey</Text>
           </View>
 
           {/* Form Section */}

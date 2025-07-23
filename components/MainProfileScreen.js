@@ -3,6 +3,7 @@ import { StyleSheet, Text, View, SafeAreaView, ScrollView, TouchableOpacity, Ima
 import { supabase } from '../lib/supabase';
 import { getUserGroups, createGroupInSupabase } from '../lib/groupsService';
 import { saveDinnerRequest, getAllDinnerRequests, recordUserResponse, createMealFromRequest } from '../lib/dinnerRequestService';
+import DebugCleanupButton from './DebugCleanupButton';
 
 // Safe image component that handles missing drawings gracefully
 const SafeDrawing = ({ source, style, resizeMode = "contain" }) => {
@@ -49,7 +50,6 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
   const [showTimeModal, setShowTimeModal] = useState(false);
 
   const [showCreateGroupModal, setShowCreateGroupModal] = useState(false);
-  const [showConflictModal, setShowConflictModal] = useState(false);
 
   // Create group form state
   const [createGroupName, setCreateGroupName] = useState('');
@@ -57,14 +57,6 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
   const [showRequestNotification, setShowRequestNotification] = useState(false);
   const [modalAnimation] = useState(new Animated.Value(0));
   const [notificationAnimation] = useState(new Animated.Value(0));
-
-  // Conflict modal data
-  const [conflictData, setConflictData] = useState({
-    title: '',
-    message: '',
-    confirmText: '',
-    onConfirm: null
-  });
 
   useEffect(() => {
     if (!isGuest) {
@@ -88,24 +80,31 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
         timestamp
       });
 
-      // Store the response locally
-      setLocalResponseMap(prev => new Map(prev).set(requestId, response));
-      
-      // Remove the notification for this request immediately
-      const updatedRequests = currentRequests.filter(req => req.id !== requestId);
-      setCurrentRequests(updatedRequests);
-      
-      // Adjust current index if needed
-      if (updatedRequests.length === 0) {
-        closeNotification();
-      } else if (currentRequestIndex >= updatedRequests.length) {
-        setCurrentRequestIndex(Math.max(0, updatedRequests.length - 1));
+      // Only process if this response is from the current user
+      if (userId === currentUserId) {
+        // Store the response locally
+        setLocalResponseMap(prev => new Map(prev).set(requestId, response));
+        
+        // Remove the notification for this request immediately
+        const updatedRequests = currentRequests.filter(req => req.id !== requestId);
+        setCurrentRequests(updatedRequests);
+        
+        // Adjust current index if needed
+        if (updatedRequests.length === 0) {
+          closeNotification();
+        } else if (currentRequestIndex >= updatedRequests.length) {
+          setCurrentRequestIndex(Math.max(0, updatedRequests.length - 1));
+        }
+        
+        console.log(`✅ [CROSS-SCREEN] Updated local response map and filtered out request ${requestId}`);
+      } else {
+        console.log(`🔍 [CROSS-SCREEN] Response from different user (${userId} vs ${currentUserId}), ignoring`);
       }
 
       // Clear the parameter to prevent re-processing
       navigation.setParams({ immediateResponseFromGroup: null });
     }
-  }, [route.params?.immediateResponseFromGroup, currentRequests, currentRequestIndex, navigation]);
+  }, [route.params?.immediateResponseFromGroup, currentRequests, currentRequestIndex, currentUserId, navigation]);
 
   // Listen for group creation/update events to refresh group list
   useEffect(() => {
@@ -178,13 +177,26 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
       if (result.success && Array.isArray(result.groups)) {
         console.log('✅ Setting groups:', result.groups.length, 'groups found');
         setUserGroups(result.groups);
+
+        // Find and select the main group if it exists
+        const mainGroup = result.groups.find(group => group.is_main_group);
+        if (mainGroup) {
+          console.log('🎯 Found main group, auto-selecting:', mainGroup.group_name);
+          setSelectedGroup(mainGroup);
+        } else if (result.groups.length > 0) {
+          // If no main group but groups exist, select the first one
+          console.log('ℹ️ No main group found, selecting first group:', result.groups[0].group_name);
+          setSelectedGroup(result.groups[0]);
+        }
       } else {
         console.log('⚠️ No groups found or error:', result.error || 'Unknown error');
         setUserGroups([]);
+        setSelectedGroup(null);
       }
     } catch (error) {
       console.error('❌ Error loading user groups:', error);
       setUserGroups([]); // Ensure we always have an array
+      setSelectedGroup(null);
     }
   };
 
@@ -364,22 +376,98 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
   const loadDinnerRequests = async () => {
     console.log('📥 Loading dinner requests from database...');
     
+    // Add timeout protection to prevent hanging
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error('Loading dinner requests timeout after 10 seconds'));
+      }, 10000);
+    });
+    
     try {
-      const result = await getAllDinnerRequests();
+      const loadingPromise = async () => {
+        const result = await getAllDinnerRequests();
+        
+        if (result.success && result.requests.length > 0) {
+          console.log('✅ Loaded dinner requests:', result.requests);
+          
+          // If currentUserId is not set, return all requests (fallback)
+          if (!currentUserId) {
+            console.log('⚠️ CurrentUserId not set, returning all requests');
+            setCurrentRequests(result.requests);
+            setCurrentRequestIndex(0);
+            return result.requests;
+          }
+          
+          // Filter out requests that the user has already responded to
+          const unansweredRequests = [];
+          
+          // Get all responses in parallel for better performance
+          const { getRequestResponses } = await import('../lib/dinnerRequestService');
+          const responseChecks = result.requests.map(async (request) => {
+            // Check if user has responded locally (current session)
+            const localResponse = localResponseMap.get(request.id);
+            if (localResponse) {
+              console.log(`🔍 Request ${request.id} already answered locally: ${localResponse}`);
+              return { request, hasResponse: true, response: localResponse };
+            }
+            
+            // Check if user has responded in database
+            try {
+              const responsesResult = await getRequestResponses(request.id);
+              
+              if (responsesResult.success && responsesResult.responses.length > 0) {
+                // Check if current user has responded
+                const userResponse = responsesResult.responses.find(r => r.user_id === currentUserId);
+                if (userResponse) {
+                  console.log(`🔍 Request ${request.id} already answered in database: ${userResponse.response}`);
+                  return { request, hasResponse: true, response: userResponse.response };
+                }
+              }
+            } catch (responseError) {
+              console.warn('⚠️ Error checking responses for request:', request.id, responseError);
+            }
+            
+            return { request, hasResponse: false };
+          });
+          
+          // Wait for all response checks
+          const responseResults = await Promise.all(responseChecks);
+          
+          // Filter and update local map
+          responseResults.forEach(result => {
+            if (result.hasResponse) {
+              // Update local map to keep it in sync
+              setLocalResponseMap(prev => new Map(prev).set(result.request.id, result.response));
+            } else {
+              // User hasn't responded yet
+              unansweredRequests.push(result.request);
+            }
+          });
+          
+          console.log(`✅ Found ${unansweredRequests.length} unanswered requests out of ${result.requests.length} total`);
+          
+          setCurrentRequests(unansweredRequests);
+          setCurrentRequestIndex(0); // Start with first request
+          return unansweredRequests; // Return only unanswered requests
+        } else {
+          console.log('📭 No dinner requests found:', result.message);
+          setCurrentRequests([]);
+          setCurrentRequestIndex(0);
+          return []; // Return empty array
+        }
+      };
       
-      if (result.success && result.requests.length > 0) {
-        console.log('✅ Loaded dinner requests:', result.requests);
-        setCurrentRequests(result.requests);
-        setCurrentRequestIndex(0); // Start with first request
-        return result.requests; // Return the loaded requests
-      } else {
-        console.log('📭 No dinner requests found:', result.message);
-        setCurrentRequests([]);
-        setCurrentRequestIndex(0);
-        return []; // Return empty array
-      }
+      return await Promise.race([loadingPromise(), timeoutPromise]);
+      
     } catch (error) {
       console.error('❌ Error loading dinner requests:', error);
+      
+      let errorMessage = 'Error loading dinner requests';
+      if (error.message === 'Loading dinner requests timeout after 10 seconds') {
+        errorMessage = 'Loading requests is taking too long. Please try again.';
+        Alert.alert('Timeout', errorMessage);
+      }
+      
       setCurrentRequests([]);
       setCurrentRequestIndex(0);
       return []; // Return empty array on error
@@ -604,7 +692,7 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
       console.log('- Terminated results:', hasTerminatedResults);
       
       if (hasActiveMealRequest || hasTerminatedResults) {
-        // Show confirmation dialog based on conflict type
+        // Show confirmation dialog based on conflict type using simple Alert
         let conflictTitle, conflictMessage, confirmButtonText;
         
         if (hasActiveMealRequest) {
@@ -617,18 +705,29 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
           confirmButtonText = 'Clear & Create New';
         }
         
-        // Show custom styled conflict modal
-        setConflictData({
-          title: conflictTitle,
-          message: conflictMessage,
-          confirmText: confirmButtonText,
-          onConfirm: async () => {
-            console.log('✅ User confirmed clearing conflicts and proceeding');
-            setShowConflictModal(false);
-            await handleClearConflictsAndProceed(formattedDate, formattedTime, formattedDeadline);
-          }
-        });
-        setShowConflictModal(true);
+        // Use React Native's built-in Alert for simplicity and reliability
+        Alert.alert(
+          conflictTitle,
+          conflictMessage,
+          [
+            {
+              text: 'Cancel',
+              style: 'cancel',
+              onPress: () => {
+                console.log('❌ User cancelled dinner request due to conflict');
+              }
+            },
+            {
+              text: confirmButtonText,
+              style: 'destructive',
+              onPress: async () => {
+                console.log('✅ User confirmed clearing conflicts and proceeding');
+                await handleClearConflictsAndProceed(formattedDate, formattedTime, formattedDeadline);
+              }
+            }
+          ],
+          { cancelable: true }
+        );
         return; // Stop here and wait for user decision
       }
       
@@ -644,30 +743,47 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
   const handleClearConflictsAndProceed = async (formattedDate, formattedTime, formattedDeadline) => {
     console.log('🧹 Clearing conflicts and proceeding with dinner request...');
     
+    // Add timeout protection to prevent freezing
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error('Conflict clearing timeout after 15 seconds'));
+      }, 15000);
+    });
+    
     try {
-      // Import necessary services
-      const { terminatedSessionsService } = await import('../lib/terminatedSessionsService');
+      const clearingPromise = async () => {
+        // Import necessary services
+        const { terminatedSessionsService } = await import('../lib/terminatedSessionsService');
+        
+        // Clear terminated results if they exist
+        const clearTerminatedResult = await terminatedSessionsService.clearTerminatedSession(selectedGroup.group_id);
+        if (!clearTerminatedResult.success) {
+          console.warn('⚠️ Failed to clear terminated results:', clearTerminatedResult.error);
+        }
+        
+        // Clean up any active session data
+        const cleanupResult = await terminatedSessionsService.cleanupActiveSession(selectedGroup.group_id);
+        if (!cleanupResult.success && !cleanupResult.partialSuccess) {
+          console.warn('⚠️ Failed to cleanup active session:', cleanupResult.error);
+        }
+        
+        console.log('✅ Conflicts cleared, proceeding with dinner request...');
+        
+        // Now proceed with the dinner request
+        await proceedWithDinnerRequest(formattedDate, formattedTime, formattedDeadline);
+      };
       
-      // Clear terminated results if they exist
-      const clearTerminatedResult = await terminatedSessionsService.clearTerminatedSession(selectedGroup.group_id);
-      if (!clearTerminatedResult.success) {
-        console.warn('⚠️ Failed to clear terminated results:', clearTerminatedResult.error);
-      }
-      
-      // Clean up any active session data
-      const cleanupResult = await terminatedSessionsService.cleanupActiveSession(selectedGroup.group_id);
-      if (!cleanupResult.success && !cleanupResult.partialSuccess) {
-        console.warn('⚠️ Failed to cleanup active session:', cleanupResult.error);
-      }
-      
-      console.log('✅ Conflicts cleared, proceeding with dinner request...');
-      
-      // Now proceed with the dinner request
-      await proceedWithDinnerRequest(formattedDate, formattedTime, formattedDeadline);
+      await Promise.race([clearingPromise(), timeoutPromise]);
       
     } catch (error) {
       console.error('❌ Error clearing conflicts:', error);
-      Alert.alert('Error', 'Failed to clear existing sessions. Please try again.');
+      
+      let errorMessage = 'Failed to clear existing sessions. Please try again.';
+      if (error.message === 'Conflict clearing timeout after 15 seconds') {
+        errorMessage = 'Clearing sessions is taking too long. Please try again.';
+      }
+      
+      Alert.alert('Error', errorMessage);
     }
   };
 
@@ -684,8 +800,16 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
 
     console.log('📝 Request data to send:', requestData);
 
+    // Add timeout protection to prevent freezing
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error('Dinner request creation timeout after 20 seconds'));
+      }, 20000);
+    });
+
     try {
-      const result = await saveDinnerRequest(requestData);
+      const requestPromise = saveDinnerRequest(requestData);
+      const result = await Promise.race([requestPromise, timeoutPromise]);
       
       if (result.success) {
         
@@ -708,13 +832,22 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
         setSelectedDate(null);
         setSelectedTime({ hour: null, minutes: 0 });
         setSelectedRecipe(null);
+        
+        // Show success message using Alert for consistency
+        Alert.alert('Success', successMessage);
       } else {
         console.error('❌ Failed to send dinner request:', result.error);
         Alert.alert('Error', result.error);
       }
     } catch (error) {
       console.error('❌ Unexpected error:', error);
-      Alert.alert('Error', 'An unexpected error occurred while sending the request.');
+      
+      let errorMessage = 'An unexpected error occurred while sending the request.';
+      if (error.message === 'Dinner request creation timeout after 20 seconds') {
+        errorMessage = 'Sending dinner request is taking too long. Please try again.';
+      }
+      
+      Alert.alert('Error', errorMessage);
     }
   };
 
@@ -858,11 +991,7 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
           </View>
         </View>
 
-        {/* Request Title */}
-        <View style={styles.requestSection}>
-          <Text style={styles.requestTitle}>Request a Dinner</Text>
-          <Text style={styles.requestSubtitle}>Choose your group, date, and time</Text>
-        </View>
+    
 
         {/* Selection Buttons */}
         <View style={styles.selectionContainer}>
@@ -960,11 +1089,26 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
         <TouchableOpacity 
           style={styles.testButton}
           onPress={async () => {
+            console.log('🧪 Testing request notification...');
             const loadedRequests = await loadDinnerRequests();
             if (loadedRequests.length > 0) {
+              console.log(`🎉 Found ${loadedRequests.length} unanswered requests, showing notification`);
               openModal('notification');
             } else {
-              Alert.alert('No Requests', 'No pending dinner requests found in your groups.');
+              // Check if there were any requests at all
+              try {
+                const allRequestsResult = await getAllDinnerRequests();
+                if (allRequestsResult.success && allRequestsResult.requests.length > 0) {
+                  Alert.alert(
+                    'All Caught Up!', 
+                    `Found ${allRequestsResult.requests.length} dinner request(s), but you've already responded to all of them. Great job staying on top of your dinner plans! 🎉`
+                  );
+                } else {
+                  Alert.alert('No Requests', 'No pending dinner requests found in your groups.');
+                }
+              } catch (error) {
+                Alert.alert('No Requests', 'No pending dinner requests found in your groups.');
+              }
             }
           }}
         >
@@ -972,6 +1116,9 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
             Test Request Notification
           </Text>
         </TouchableOpacity>
+
+        {/* Emergency Database Cleanup Button */}
+        <DebugCleanupButton />
       </ScrollView>
 
       {/* Group Selection Modal */}
@@ -1023,10 +1170,12 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
               <TouchableOpacity
                 style={[styles.modalOption, styles.addGroupOption]}
                 onPress={() => {
-                  console.log('🔵 Add Group button pressed');
-                  Alert.alert('Debug', 'Add Group button was pressed!');
+                  console.log('🔵 Switching to Groups tab');
                   setShowGroupModal(false);
-                  setShowCreateGroupModal(true);
+                  navigation.setParams({ 
+                    switchToGroupsTab: true,
+                    screen: 'groups'
+                  });
                 }}
               >
                 <Text style={styles.addGroupText}>+ Add Group</Text>
@@ -1324,50 +1473,7 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
         </View>
       </Modal>
 
-      {/* Conflict Resolution Modal */}
-      <Modal visible={showConflictModal} transparent={true} animationType="none">
-        <View style={styles.modalOverlay}>
-          <Animated.View 
-            style={[
-              styles.modalContainer,
-              styles.conflictModalContainer,
-              {
-                transform: [
-                  {
-                    scale: modalAnimation.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [0.8, 1],
-                    }),
-                  },
-                ],
-                opacity: modalAnimation,
-              },
-            ]}
-          >
-            <Text style={styles.conflictModalTitle}>{conflictData.title}</Text>
-            <Text style={styles.conflictModalMessage}>{conflictData.message}</Text>
-            
-            <View style={styles.conflictModalButtons}>
-              <TouchableOpacity 
-                style={styles.conflictCancelButton}
-                onPress={() => {
-                  console.log('❌ User cancelled dinner request due to conflict');
-                  setShowConflictModal(false);
-                }}
-              >
-                <Text style={styles.conflictCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity 
-                style={styles.conflictConfirmButton}
-                onPress={conflictData.onConfirm}
-              >
-                <Text style={styles.conflictConfirmText}>{conflictData.confirmText}</Text>
-              </TouchableOpacity>
-            </View>
-          </Animated.View>
-        </View>
-      </Modal>
+
     </SafeAreaView>
   );
 }
@@ -2048,74 +2154,5 @@ const styles = StyleSheet.create({
   recipeOptionTextSelected: {
     color: '#8B7355',
     fontFamily: 'Inter_600SemiBold',
-  },
-
-  // Conflict Modal Styles
-  conflictModalContainer: {
-    minHeight: 200,
-    paddingVertical: 32,
-    paddingHorizontal: 24,
-  },
-  conflictModalTitle: {
-    fontFamily: 'PlayfairDisplay_700Bold',
-    fontSize: 24,
-    lineHeight: 32,
-    color: '#C5483D',
-    textAlign: 'center',
-    marginBottom: 16,
-    letterSpacing: 0.3,
-  },
-  conflictModalMessage: {
-    fontFamily: 'Inter_400Regular',
-    fontSize: 16,
-    lineHeight: 24,
-    color: '#2D2D2D',
-    textAlign: 'center',
-    marginBottom: 32,
-    letterSpacing: 0.1,
-  },
-  conflictModalButtons: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  conflictCancelButton: {
-    flex: 1,
-    backgroundColor: 'transparent',
-    borderWidth: 2,
-    borderColor: '#E0E0E0',
-    borderRadius: 12,
-    paddingVertical: 16,
-    paddingHorizontal: 24,
-    alignItems: 'center',
-  },
-  conflictCancelText: {
-    fontFamily: 'Inter_500Medium',
-    fontSize: 16,
-    lineHeight: 20,
-    color: '#6B6B6B',
-    letterSpacing: 0.2,
-  },
-  conflictConfirmButton: {
-    flex: 1,
-    backgroundColor: '#C5483D',
-    borderRadius: 12,
-    paddingVertical: 16,
-    paddingHorizontal: 24,
-    alignItems: 'center',
-    shadowColor: '#C5483D',
-    shadowOffset: {
-      width: 0,
-      height: 3,
-    },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  conflictConfirmText: {
-    fontFamily: 'Inter_600SemiBold',
-    fontSize: 16,
-    lineHeight: 20,
-    color: '#FEFEFE',
-    letterSpacing: 0.2,
   },
 }); 

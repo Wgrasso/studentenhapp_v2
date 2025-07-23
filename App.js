@@ -5,6 +5,7 @@ import { createStackNavigator } from '@react-navigation/stack';
 import { useFonts, PlayfairDisplay_400Regular, PlayfairDisplay_700Bold } from '@expo-google-fonts/playfair-display';
 import { Inter_400Regular, Inter_500Medium, Inter_600SemiBold } from '@expo-google-fonts/inter';
 
+import { AppStateProvider } from './lib/AppStateContext';
 import SignInScreen from './components/SignInScreen';
 import SignUpScreen from './components/SignUpScreen';
 import ProfileScreen from './components/ProfileScreen';
@@ -28,22 +29,24 @@ export default function App() {
   }
 
   return (
-    <NavigationContainer>
-      <StatusBar style="dark" />
-      <Stack.Navigator
-        initialRouteName="SignIn"
-        screenOptions={{
-          headerShown: false, // Hide headers for clean aesthetic
-          cardStyle: { backgroundColor: '#FEFEFE' }, // Consistent background
-        }}
-      >
-        <Stack.Screen name="MainTabs" component={MainTabNavigator} />
-        <Stack.Screen name="SignIn" component={SignInScreen} />
-        <Stack.Screen name="SignUp" component={SignUpScreen} />
-        <Stack.Screen name="Profile" component={ProfileScreen} />
-        <Stack.Screen name="VotingScreen" component={VotingScreen} />
-        <Stack.Screen name="ResultsScreen" component={ResultsScreen} />
-      </Stack.Navigator>
-    </NavigationContainer>
+    <AppStateProvider>
+      <NavigationContainer>
+        <StatusBar style="dark" />
+        <Stack.Navigator
+          initialRouteName="SignIn"
+          screenOptions={{
+            headerShown: false, // Hide headers for clean aesthetic
+            cardStyle: { backgroundColor: '#FEFEFE' }, // Consistent background
+          }}
+        >
+          <Stack.Screen name="MainTabs" component={MainTabNavigator} />
+          <Stack.Screen name="SignIn" component={SignInScreen} />
+          <Stack.Screen name="SignUp" component={SignUpScreen} />
+          <Stack.Screen name="Profile" component={ProfileScreen} />
+          <Stack.Screen name="VotingScreen" component={VotingScreen} />
+          <Stack.Screen name="ResultsScreen" component={ResultsScreen} />
+        </Stack.Navigator>
+      </NavigationContainer>
+    </AppStateProvider>
   );
 }

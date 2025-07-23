@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS public.groups (
     created_by UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
     description TEXT DEFAULT '',
     max_members INTEGER DEFAULT 50,
-    is_active BOOLEAN DEFAULT true
+    is_active BOOLEAN DEFAULT true,
+    is_main_group BOOLEAN DEFAULT false
 );
 
 -- 2. Create group_members table
@@ -83,6 +84,10 @@ CREATE INDEX IF NOT EXISTS idx_group_members_user_id ON public.group_members(use
 -- Drop the problematic admin policy that causes infinite recursion
 DROP POLICY IF EXISTS "Admins can manage group members" ON public.group_members;
 
+-- Add is_main_group column to existing groups table
+ALTER TABLE public.groups 
+ADD COLUMN IF NOT EXISTS is_main_group BOOLEAN DEFAULT false;
+
 -- 7. Create a function to get user's groups with member count (FIXED)
 CREATE OR REPLACE FUNCTION get_user_groups(user_uuid UUID)
 RETURNS TABLE (
@@ -94,7 +99,8 @@ RETURNS TABLE (
     created_by UUID,
     user_role TEXT,
     member_count BIGINT,
-    is_creator BOOLEAN
+    is_creator BOOLEAN,
+    is_main_group BOOLEAN
 ) 
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -110,7 +116,8 @@ BEGIN
         g.created_by,
         gm.role as user_role,
         (SELECT COUNT(*) FROM public.group_members WHERE group_members.group_id = g.id AND is_active = true) as member_count,
-        (g.created_by = user_uuid) as is_creator
+        (g.created_by = user_uuid) as is_creator,
+        g.is_main_group
     FROM public.groups g
     JOIN public.group_members gm ON g.id = gm.group_id
     WHERE gm.user_id = user_uuid 

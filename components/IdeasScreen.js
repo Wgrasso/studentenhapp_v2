@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, SafeAreaView, ScrollView, TouchableOpacity, Image, Linking, ActivityIndicator, Modal, Animated, Dimensions, Alert } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { getUserWishlist, addToWishlist as addToWishlistDB, removeFromWishlist as removeFromWishlistDB, clearWishlist as clearWishlistDB } from '../lib/wishlistService';
+import { getRandomRecipes, getAllRecipes } from '../lib/recipesService';
 
 // Safe image component that handles missing drawings gracefully
 const SafeDrawing = ({ source, style, resizeMode = "contain" }) => {
@@ -58,24 +59,10 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
           await loadWishlistFromDB();
         }
         
-        // Try to get preloaded meals first
-        const { getPreloadedInspirationMeals } = require('../lib/mealPreloadService');
-        const preloadedMeals = getPreloadedInspirationMeals();
-        
-        if (preloadedMeals && preloadedMeals.length > 0) {
-          console.log('✅ Using preloaded meals for inspiration page');
-          // Transform and use preloaded meals
-          const transformedRecipes = transformMealsToRecipes(preloadedMeals);
-          setAllLoadedRecipes(transformedRecipes);
-          setRecipes(transformedRecipes.slice(0, 20));
-          setDisplayedCount(20);
-          setLoading(false);
-          setIsInitialized(true);
-        } else {
-          console.log('⚠️ No preloaded meals available, fetching new meals...');
-          await loadFeaturedRecipes();
-          setIsInitialized(true);
-        }
+        // Skip preloaded meals and load directly from database
+        console.log('🚀 Loading recipes from database instead of preloaded meals...');
+        await loadFeaturedRecipes();
+        setIsInitialized(true);
       } else {
         // Just refresh user preferences if already initialized
         await loadUserPreferences();
@@ -109,200 +96,130 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
   };
 
   const loadFeaturedRecipes = async (isLoadingMore = false) => {
+    console.log('🔥 loadFeaturedRecipes called with isLoadingMore:', isLoadingMore);
+    
     if (isLoadingMore) {
       setLoadingMore(true);
     } else {
       setLoading(true);
     }
+    
     try {
-      // Using Tasty API from RapidAPI
-      let pageOffset;
+      console.log('📡 Loading recipes from database...');
+      
+      let result;
       if (isLoadingMore) {
-        // For loading more, use sequential pagination
-        pageOffset = allLoadedRecipes.length;
+        // Load more recipes using pagination
+        console.log('📄 Loading more recipes with pagination...');
+        result = await getAllRecipes(allLoadedRecipes.length, 20);
       } else {
-        // For initial load, use random offset to get different recipes each time
-        // Generate random offset between 0-2000 to get different starting points
-        pageOffset = Math.floor(Math.random() * 2000);
-      }
-      
-      let apiUrl = `https://tasty.p.rapidapi.com/recipes/list?from=${pageOffset}&size=40`; // Increased size for better randomization
-      
-      // Add user preference filters for authenticated users
-      if (!isGuest && userPreferences.cuisines.length > 0) {
-        const cuisineMap = {
-          'italian': 'italian',
-          'mexican': 'mexican',
-          'chinese': 'chinese',
-          'japanese': 'japanese',
-          'indian': 'indian',
-          'thai': 'thai',
-          'mediterranean': 'mediterranean',
-          'american': 'american',
-          'french': 'french',
-          'greek': 'greek'
-        };
-        
-        const tastyTags = userPreferences.cuisines
-          .map(c => cuisineMap[c])
-          .filter(Boolean)
-          .join(',');
-        
-        if (tastyTags) {
-          apiUrl += `&tags=${tastyTags}`;
-        }
+        // Initial load - try getAllRecipes first (more reliable than random function)
+        console.log('🎲 Loading recipes...');
+        result = await getAllRecipes(0, 40);
       }
 
-      const response = await fetch(apiUrl, {
-        method: 'GET',
-        headers: {
-          'x-rapidapi-key': '0b5f1c0661msh2e3ca9ee26bb396p14c318jsn2df1c34cf519',
-          'x-rapidapi-host': 'tasty.p.rapidapi.com'
-        }
-      });
+      console.log('📊 Database result:', result);
       
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (!result.success) {
+        console.error('❌ Database query failed:', result.error);
+        throw new Error(result.error);
       }
-      
-      const data = await response.json();
-      
-      if (!data.results || data.results.length === 0) {
-        // Fallback to basic request if no results
-        const fallbackOffset = Math.floor(Math.random() * 1000); // Random fallback too
-        const fallbackUrl = `https://tasty.p.rapidapi.com/recipes/list?from=${fallbackOffset}&size=40`;
+
+      if (!result.recipes || result.recipes.length === 0) {
+        console.log('📭 No recipes found in database');
+        throw new Error('No recipes found in database');
+        }
+
+              // Convert database format to our recipe format
+        console.log('🔧 Converting database recipes:', result.recipes);
         
-        const fallbackResponse = await fetch(fallbackUrl, {
-          method: 'GET',
-          headers: {
-            'x-rapidapi-key': '0b5f1c0661msh2e3ca9ee26bb396p14c318jsn2df1c34cf519',
-            'x-rapidapi-host': 'tasty.p.rapidapi.com'
-          }
+        const normalizedRecipes = result.recipes.map(dbRecipe => {
+          console.log('🔧 Processing recipe:', dbRecipe);
+          
+          // Extract recipe data from the database record
+          const recipe = dbRecipe.recipe_data;
+          console.log('🔧 Recipe data:', recipe);
+          
+          // Ensure all required fields are present
+          const normalized = {
+            id: recipe.id,
+            title: recipe.title,
+            image: recipe.image,
+            readyInMinutes: recipe.readyInMinutes,
+            dietary: recipe.dietary || [],
+            description: recipe.description || 'A delicious recipe perfect for your next meal',
+            sourceUrl: recipe.sourceUrl || `#recipe-${recipe.id}`,
+            tastyId: recipe.tastyId || recipe.id,
+            ingredients: recipe.ingredients || [],
+            instructions: recipe.instructions || '',
+            pricePerServing: recipe.pricePerServing || null
+          };
+          
+          console.log('🔧 Normalized recipe:', normalized);
+          return normalized;
         });
-        const fallbackData = await fallbackResponse.json();
-        data.results = fallbackData.results || [];
-      }
-
-      // Universal recipe normalization - handles both new format and Tasty API format
-      const normalizeRecipe = (recipe) => {
-        // If recipe already has title, image, readyInMinutes etc., it's already in new format
-        if (recipe.title && recipe.image && recipe.hasOwnProperty('readyInMinutes')) {
-                  return {
-          id: recipe.id,
-          title: recipe.title,
-          image: recipe.image,
-          readyInMinutes: recipe.readyInMinutes,
-          dietary: recipe.dietary || [],
-          description: recipe.description || 'A delicious recipe perfect for your next meal',
-          sourceUrl: recipe.sourceUrl || `https://tasty.co/recipe/${recipe.id}`,
-          tastyId: recipe.tastyId || recipe.id,
-          ingredients: recipe.ingredients || [],
-          instructions: recipe.instructions || '',
-          pricePerServing: recipe.pricePerServing || null
-        };
-        }
-
-        // Otherwise, transform from old Tasty API format
-        // Quick dietary extraction (only what we display)
-        const dietary = [];
-        if (recipe.tags) {
-          for (const tag of recipe.tags) {
-            const tagName = tag.name?.toLowerCase();
-            if (tagName?.includes('vegetarian')) dietary.push('vegetarian');
-            else if (tagName?.includes('vegan')) dietary.push('vegan');
-            else if (tagName?.includes('gluten') && tagName?.includes('free')) dietary.push('gluten-free');
-            else if (tagName?.includes('dairy') && tagName?.includes('free')) dietary.push('dairy-free');
-            else if (tagName?.includes('keto')) dietary.push('keto');
-            // Stop after finding 2 dietary tags for performance
-            if (dietary.length >= 2) break;
-          }
-        }
-
-        // Simple time calculation
-        const totalTime = recipe.total_time_minutes || recipe.cook_time_minutes || recipe.prep_time_minutes || 30;
-
-        // Simple image URL
-        const thumbnailUrl = recipe.thumbnail_url || 
-                           (recipe.renditions?.[0]?.url) ||
-                           'https://images.unsplash.com/photo-1565299624946-b28f40a0ca4b?w=400&h=300&fit=crop';
-
-        // Simple source URL
-        const sourceUrl = recipe.original_video_url || 
-                         recipe.beauty_url || 
-                         recipe.video_url ||
-                         `https://tasty.co/recipe/${recipe.slug || recipe.id}`;
-
-        return {
-          id: recipe.id,
-          title: recipe.name || recipe.title || 'Delicious Recipe',
-          image: thumbnailUrl,
-          readyInMinutes: totalTime,
-          dietary: dietary,
-          description: recipe.description ? 
-            recipe.description.substring(0, 100) + '...' : 
-            'A delicious recipe perfect for your next meal',
-          sourceUrl: sourceUrl,
-          tastyId: recipe.id,
-          ingredients: recipe.ingredients || [],
-          instructions: recipe.instructions || '',
-          pricePerServing: recipe.pricePerServing || null
-        };
-      };
-
-      // Transform API data to match our format
-      const transformedRecipes = data.results.map(normalizeRecipe);
-
-      // Shuffle the recipes for additional randomization
-      const shuffledRecipes = [...transformedRecipes].sort(() => Math.random() - 0.5);
+        
+        console.log('🔧 All normalized recipes:', normalizedRecipes);
 
       if (isLoadingMore) {
-        // Add new batch to existing loaded recipes (take first 20 from shuffled results)
-        const newRecipes = shuffledRecipes.slice(0, 20);
-        setAllLoadedRecipes(prev => [...prev, ...newRecipes]);
-        setRecipes(prev => [...prev, ...newRecipes]);
+        // Add new recipes to existing ones
+        setAllLoadedRecipes(prev => [...prev, ...normalizedRecipes]);
+        setRecipes(prev => [...prev, ...normalizedRecipes]);
       } else {
-        // Initial load - store all recipes and show first 20 (from shuffled results)
-        const initialRecipes = shuffledRecipes.slice(0, 20);
-        setAllLoadedRecipes(shuffledRecipes);
-        setRecipes(initialRecipes);
-        setDisplayedCount(initialRecipes.length);
+        // Initial load - replace all recipes
+        setAllLoadedRecipes(normalizedRecipes);
+        setRecipes(normalizedRecipes.slice(0, 20)); // Show first 20
+        setDisplayedCount(Math.min(20, normalizedRecipes.length));
       }
+
     } catch (error) {
-      console.error('❌ Error loading recipes from Tasty API:', error);
+      console.error('❌ Error loading recipes from database:', error);
+      console.error('❌ Full error details:', error.message, error.stack);
       
-      // Fallback to a few basic recipes if API fails
+      // Show alert to user about the database issue
+      Alert.alert(
+        'Database Connection Issue', 
+        `Could not load recipes from database: ${error.message}. Showing sample recipes instead.`,
+        [{ text: 'OK' }]
+      );
+      
+      // Fallback to sample recipes if database fails
       const fallbackRecipes = [
         {
-          id: 'fallback-1',
-          title: "Simple Chicken Dinner",
+          id: 'sample-1',
+          title: "Sample Recipe 1",
           image: "https://images.unsplash.com/photo-1598103442097-8b74394b95c6?w=400&h=300&fit=crop",
           readyInMinutes: 30,
-          difficulty: "Easy",
-          cuisineType: "american",
           dietary: [],
-          description: "A quick and delicious chicken dinner perfect for weeknights"
+          description: "Add your own recipes to see them here! Go to the database and insert recipe data.",
+          sourceUrl: "#",
+          tastyId: 'sample-1',
+          ingredients: ["Sample ingredient"],
+          instructions: "Add your recipes to the database to see real content here.",
+          pricePerServing: null
         },
         {
-          id: 'fallback-2',
-          title: "Pasta Night",
+          id: 'sample-2',
+          title: "Sample Recipe 2",
           image: "https://images.unsplash.com/photo-1621996346565-e3dbc353d2c5?w=400&h=300&fit=crop",
           readyInMinutes: 25,
-          difficulty: "Easy",
-          cuisineType: "italian",
           dietary: ["vegetarian"],
-          description: "Comforting pasta dish that's ready in no time"
+          description: "This is a sample recipe. Add your own recipes to the database to see real content.",
+          sourceUrl: "#",
+          tastyId: 'sample-2',
+          ingredients: ["Sample ingredient"],
+          instructions: "Add your recipes to the database to see real content here.",
+          pricePerServing: 3.50
         }
       ];
       
-      // Shuffle fallback recipes too
-      const shuffledFallback = [...fallbackRecipes].sort(() => Math.random() - 0.5);
-      
       if (isLoadingMore) {
-        setAllLoadedRecipes(prev => [...prev, ...shuffledFallback]);
-        setRecipes(prev => [...prev, ...shuffledFallback]);
+        setAllLoadedRecipes(prev => [...prev, ...fallbackRecipes]);
+        setRecipes(prev => [...prev, ...fallbackRecipes]);
       } else {
-        setAllLoadedRecipes(shuffledFallback);
-        setRecipes(shuffledFallback);
+        setAllLoadedRecipes(fallbackRecipes);
+        setRecipes(fallbackRecipes);
+        setDisplayedCount(fallbackRecipes.length);
       }
     } finally {
       setLoading(false);
@@ -398,7 +315,7 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
         console.log('✅ Loaded wishlist from database:', recipes.length, 'items');
       } else {
         console.log('⚠️ Failed to load wishlist:', result.error);
-      }
+        }
     } catch (error) {
       console.error('❌ Error loading wishlist:', error);
     }
@@ -500,7 +417,7 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
       <SafeAreaView style={styles.container}>
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color="#8B7355" />
-          <Text style={styles.loadingText}>Discovering delicious recipes from Tasty...</Text>
+          <Text style={styles.loadingText}>Loading delicious recipes...</Text>
         </View>
       </SafeAreaView>
     );
@@ -541,9 +458,9 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
           </View>
           
           {activeTab === 'meals' && (
-            <Text style={styles.dateText}>{getCurrentDate()}</Text>
+          <Text style={styles.dateText}>{getCurrentDate()}</Text>
           )}
-          
+
           {activeTab === 'wishlist' && (
             <Text style={styles.dateText}>
               {wishlist.length} recipe{wishlist.length !== 1 ? 's' : ''} saved
@@ -553,26 +470,26 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
 
         {/* Content based on active tab */}
         {activeTab === 'meals' ? (
-          <View style={styles.recipesContainer}>
-            <Text style={styles.sectionTitle}>Featured Recipes</Text>
-
-            {recipes.map((recipe) => (
-              <TouchableOpacity 
-                key={recipe.id} 
-                style={styles.recipeCard}
-                onPress={() => openRecipe(recipe)}
-                activeOpacity={0.9}
-              >
-                <Image 
-                  source={{ uri: recipe.image }} 
-                  style={styles.recipeImage}
-                  resizeMode="cover"
-                />
-                
-                <View style={styles.recipeContent}>
-                  <View style={styles.recipeHeader}>
-                    <Text style={styles.recipeTitle}>{recipe.title}</Text>
-                    <View style={styles.recipeMetrics}>
+        <View style={styles.recipesContainer}>
+          <Text style={styles.sectionTitle}>Featured Recipes</Text>
+          
+          {recipes.map((recipe) => (
+            <TouchableOpacity 
+              key={recipe.id} 
+              style={styles.recipeCard}
+              onPress={() => openRecipe(recipe)}
+              activeOpacity={0.9}
+            >
+              <Image 
+                source={{ uri: recipe.image }} 
+                style={styles.recipeImage}
+                resizeMode="cover"
+              />
+              
+              <View style={styles.recipeContent}>
+                <View style={styles.recipeHeader}>
+                  <Text style={styles.recipeTitle}>{recipe.title}</Text>
+                  <View style={styles.recipeMetrics}>
                       <TouchableOpacity 
                         style={styles.wishlistButton}
                         onPress={() => toggleWishlist(recipe)}
@@ -581,32 +498,32 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
                           {isRecipeInWishlist(recipe.id) ? '❤️' : '🤍'}
                         </Text>
                       </TouchableOpacity>
-                      <View style={styles.timeContainer}>
-                        <Text style={styles.timeText}>{formatTime(recipe.readyInMinutes)}</Text>
-                      </View>
+                    <View style={styles.timeContainer}>
+                      <Text style={styles.timeText}>{formatTime(recipe.readyInMinutes)}</Text>
+                    </View>
                       {recipe.pricePerServing && (
                         <View style={styles.priceContainer}>
                           <Text style={styles.priceText}>€{recipe.pricePerServing.toFixed(2)}</Text>
-                        </View>
+                    </View>
                       )}
-                    </View>
                   </View>
-                  
-                  <Text style={styles.recipeDescription}>{recipe.description}</Text>
-                  
-                  {recipe.dietary.length > 0 && (
-                    <View style={styles.dietaryTags}>
-                      {recipe.dietary.slice(0, 2).map((dietary, index) => (
-                        <View key={index} style={styles.dietaryTag}>
-                          <Text style={styles.dietaryTagText}>{dietary}</Text>
-                        </View>
-                      ))}
-                    </View>
-                  )}
                 </View>
-              </TouchableOpacity>
-            ))}
-          </View>
+                
+                <Text style={styles.recipeDescription}>{recipe.description}</Text>
+                
+                {recipe.dietary.length > 0 && (
+                  <View style={styles.dietaryTags}>
+                    {recipe.dietary.slice(0, 2).map((dietary, index) => (
+                      <View key={index} style={styles.dietaryTag}>
+                        <Text style={styles.dietaryTagText}>{dietary}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </View>
+            </TouchableOpacity>
+          ))}
+        </View>
         ) : (
           <View style={styles.recipesContainer}>
             <Text style={styles.sectionTitle}>Your Wishlist</Text>
@@ -674,35 +591,35 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
 
         {/* Bottom Action */}
         {activeTab === 'meals' && (
-          <View style={styles.bottomAction}>
-            <TouchableOpacity 
-              style={[styles.moreRecipesButton, loadingMore && styles.buttonDisabled]}
-              onPress={refreshRecipes}
-              disabled={loadingMore}
-            >
-              {loadingMore ? (
-                <ActivityIndicator size="small" color="#FEFEFE" />
-              ) : (
-                <Text style={styles.moreRecipesButtonText}>
-                  {displayedCount >= allLoadedRecipes.length ? 
-                    'Discover New Recipes' : 
-                    `Show More (${Math.min(20, allLoadedRecipes.length - displayedCount)} more available)`
-                  }
-                </Text>
-              )}
-            </TouchableOpacity>
-            
-            {isGuest && (
-              <TouchableOpacity 
-                style={styles.signInPrompt}
-                onPress={() => navigation.navigate('SignIn')}
-              >
-                <Text style={styles.signInPromptText}>
-                  Sign in for personalized recommendations
-                </Text>
-              </TouchableOpacity>
+        <View style={styles.bottomAction}>
+          <TouchableOpacity 
+            style={[styles.moreRecipesButton, loadingMore && styles.buttonDisabled]}
+            onPress={refreshRecipes}
+            disabled={loadingMore}
+          >
+            {loadingMore ? (
+              <ActivityIndicator size="small" color="#FEFEFE" />
+            ) : (
+              <Text style={styles.moreRecipesButtonText}>
+                {displayedCount >= allLoadedRecipes.length ? 
+                  'Discover New Recipes' : 
+                  `Show More (${Math.min(20, allLoadedRecipes.length - displayedCount)} more available)`
+                }
+              </Text>
             )}
-          </View>
+          </TouchableOpacity>
+          
+          {isGuest && (
+            <TouchableOpacity 
+              style={styles.signInPrompt}
+              onPress={() => navigation.navigate('SignIn')}
+            >
+              <Text style={styles.signInPromptText}>
+                Sign in for personalized recommendations
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
         )}
         
         {activeTab === 'wishlist' && wishlist.length > 0 && (
@@ -787,10 +704,10 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
                         <Text style={styles.metricValue}>{formatTime(selectedRecipe.readyInMinutes)}</Text>
                       </View>
                       {selectedRecipe.pricePerServing && (
-                        <View style={styles.modalMetricItem}>
+                      <View style={styles.modalMetricItem}>
                           <Text style={styles.metricLabel}>Price per Serving</Text>
                           <Text style={styles.metricValue}>€{selectedRecipe.pricePerServing.toFixed(2)}</Text>
-                        </View>
+                      </View>
                       )}
                     </View>
 

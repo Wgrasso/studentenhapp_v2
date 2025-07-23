@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { StyleSheet, Text, View, SafeAreaView, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, Image, Modal, Animated, Clipboard, Alert } from 'react-native';
 import Slider from '@react-native-community/slider';
-import { createGroupInSupabase, joinGroupByCode, getUserGroups, leaveGroup, deleteGroup, getGroupMembers, setMainGroup } from '../lib/groupsService';
+import { createGroupInSupabase, joinGroupByCode, getUserGroups, leaveGroup, deleteGroup, getGroupMembers, setFavoriteGroup, getFavoriteGroupId } from '../lib/groupsService';
 import { getMealOptions } from '../lib/mealRequestService';
 import { getActiveMealRequest, createMealRequest, replaceMealRequest, debugGetActiveRequests, debugCompleteAllActiveRequests, completeMealRequest, getTopVotedMeals, getUserVotingProgress } from '../lib/mealRequestService';
 import { getGroupMemberResponses, getAllDinnerRequests, recordUserResponse, createMealFromRequest, completeDinnerRequest } from '../lib/dinnerRequestService';
@@ -333,6 +333,7 @@ export default function GroupsScreen({ route, navigation }) {
   
   // Local state for instant button display when user clicks YES (optimistic UI)
   const [userLocallyAcceptedRequest, setUserLocallyAcceptedRequest] = useState(false);
+  const [favoriteGroupId, setFavoriteGroupId] = useState(null);
 
     // Main effect - handles initial load and user changes
   useEffect(() => {
@@ -2367,6 +2368,15 @@ export default function GroupsScreen({ route, navigation }) {
     }
   };
 
+  // Load favorite group on mount
+  useEffect(() => {
+    const loadFavoriteGroup = async () => {
+      const favId = await getFavoriteGroupId();
+      setFavoriteGroupId(favId);
+    };
+    loadFavoriteGroup();
+  }, []);
+
   if (isGuest) {
     return (
       <SafeAreaView style={styles.container}>
@@ -2517,11 +2527,11 @@ export default function GroupsScreen({ route, navigation }) {
                       style={styles.starButton}
                       onPress={(e) => {
                         e.stopPropagation(); // Prevent opening detail modal
-                        if (!group.is_main_group) {
+                        if (group.group_id !== favoriteGroupId) {
                           withCooldown(async () => {
-                            const result = await setMainGroup(group.group_id);
+                            const result = await setFavoriteGroup(group.group_id);
                             if (result.success) {
-                              loadUserGroups(); // Reload to update UI
+                              setFavoriteGroupId(group.group_id);
                             } else {
                               showAlert('Error', result.error);
                             }
@@ -2529,7 +2539,7 @@ export default function GroupsScreen({ route, navigation }) {
                         }
                       }}
                     >
-                      <Text style={[styles.starIcon, group.is_main_group && styles.starIconActive]}>
+                      <Text style={[styles.starIcon, group.group_id === favoriteGroupId && styles.starIconActive]}>
                         ★
                       </Text>
                     </TouchableOpacity>

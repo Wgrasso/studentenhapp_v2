@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, SafeAreaView, ScrollView, TouchableOpacity, Image, Linking, ActivityIndicator, Modal, Animated, Dimensions, Alert } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { getUserWishlist, addToWishlist as addToWishlistDB, removeFromWishlist as removeFromWishlistDB, clearWishlist as clearWishlistDB } from '../lib/wishlistService';
 
 // Safe image component that handles missing drawings gracefully
 const SafeDrawing = ({ source, style, resizeMode = "contain" }) => {
@@ -42,10 +43,20 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
 
   const { width, height } = Dimensions.get('window');
 
+  // Reload wishlist when switching to wishlist tab
+  useEffect(() => {
+    if (activeTab === 'wishlist' && !isGuest) {
+      loadWishlistFromDB();
+    }
+  }, [activeTab, isGuest]);
+
   useEffect(() => {
     const initializeData = async () => {
       if (!isInitialized) {
         await loadUserPreferences();
+        if (!isGuest) {
+          await loadWishlistFromDB();
+        }
         
         // Try to get preloaded meals first
         const { getPreloadedInspirationMeals } = require('../lib/mealPreloadService');
@@ -172,105 +183,74 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
         data.results = fallbackData.results || [];
       }
 
-      // Transform Tasty API data to match our format
-      const transformedRecipes = data.results.map(recipe => {
-        // Extract cuisine type from tags
-        let cuisineType = 'international';
-        if (recipe.tags && recipe.tags.length > 0) {
-          const cuisineTag = recipe.tags.find(tag => 
-            ['italian', 'mexican', 'chinese', 'japanese', 'indian', 'thai', 'mediterranean', 'american', 'french', 'greek'].includes(tag.name?.toLowerCase())
-          );
-          if (cuisineTag) {
-            cuisineType = cuisineTag.name.toLowerCase();
-          }
+      // Universal recipe normalization - handles both new format and Tasty API format
+      const normalizeRecipe = (recipe) => {
+        // If recipe already has title, image, readyInMinutes etc., it's already in new format
+        if (recipe.title && recipe.image && recipe.hasOwnProperty('readyInMinutes')) {
+                  return {
+          id: recipe.id,
+          title: recipe.title,
+          image: recipe.image,
+          readyInMinutes: recipe.readyInMinutes,
+          dietary: recipe.dietary || [],
+          description: recipe.description || 'A delicious recipe perfect for your next meal',
+          sourceUrl: recipe.sourceUrl || `https://tasty.co/recipe/${recipe.id}`,
+          tastyId: recipe.tastyId || recipe.id,
+          ingredients: recipe.ingredients || [],
+          instructions: recipe.instructions || '',
+          pricePerServing: recipe.pricePerServing || null
+        };
         }
 
-        // Extract dietary information from tags
+        // Otherwise, transform from old Tasty API format
+        // Quick dietary extraction (only what we display)
         const dietary = [];
         if (recipe.tags) {
-          recipe.tags.forEach(tag => {
+          for (const tag of recipe.tags) {
             const tagName = tag.name?.toLowerCase();
             if (tagName?.includes('vegetarian')) dietary.push('vegetarian');
-            if (tagName?.includes('vegan')) dietary.push('vegan');
-            if (tagName?.includes('gluten') && tagName?.includes('free')) dietary.push('gluten-free');
-            if (tagName?.includes('dairy') && tagName?.includes('free')) dietary.push('dairy-free');
-            if (tagName?.includes('keto')) dietary.push('keto');
-          });
-        }
-
-        // Determine cooking time with better fallback logic (allow up to 2 hours = 120 minutes)
-        let totalTime = recipe.total_time_minutes || recipe.cook_time_minutes || recipe.prep_time_minutes;
-        
-        // If no time data available, assign a realistic random time based on recipe complexity
-        if (!totalTime) {
-          const instructionCount = recipe.instructions?.length || 0;
-          const componentCount = recipe.sections?.length || 0;
-          
-          // Generate realistic cooking times based on recipe complexity
-          if (instructionCount <= 4 && componentCount <= 1) {
-            // Simple recipes: 15-45 minutes
-            totalTime = Math.floor(Math.random() * 30) + 15;
-          } else if (instructionCount <= 8 && componentCount <= 2) {
-            // Medium recipes: 30-75 minutes
-            totalTime = Math.floor(Math.random() * 45) + 30;
-          } else {
-            // Complex recipes: 45-120 minutes
-            totalTime = Math.floor(Math.random() * 75) + 45;
+            else if (tagName?.includes('vegan')) dietary.push('vegan');
+            else if (tagName?.includes('gluten') && tagName?.includes('free')) dietary.push('gluten-free');
+            else if (tagName?.includes('dairy') && tagName?.includes('free')) dietary.push('dairy-free');
+            else if (tagName?.includes('keto')) dietary.push('keto');
+            // Stop after finding 2 dietary tags for performance
+            if (dietary.length >= 2) break;
           }
         }
 
-        // Cap at 2 hours maximum but don't exclude longer recipes, just cap them
-        if (totalTime > 120) {
-          totalTime = 120;
-        }
+        // Simple time calculation
+        const totalTime = recipe.total_time_minutes || recipe.cook_time_minutes || recipe.prep_time_minutes || 30;
 
-        const instructionCount = recipe.instructions?.length || 0;
-        
-        // Determine difficulty based on time and complexity
-        let difficulty = 'Easy';
-        if (totalTime > 45 || instructionCount > 6) {
-          difficulty = 'Medium';
-        }
-        if (totalTime > 75 || instructionCount > 10) {
-          difficulty = 'Hard';
-        }
-
-        // Get the best thumbnail image
+        // Simple image URL
         const thumbnailUrl = recipe.thumbnail_url || 
-                           (recipe.renditions && recipe.renditions.find(r => r.name === 'facebook')?.url) ||
+                           (recipe.renditions?.[0]?.url) ||
                            'https://images.unsplash.com/photo-1565299624946-b28f40a0ca4b?w=400&h=300&fit=crop';
 
-        // Better URL extraction - try multiple fields and construct Tasty URL if needed
-        let sourceUrl = recipe.original_video_url || 
-                       recipe.beauty_url || 
-                       recipe.video_url;
-        
-        // If no direct URL, construct a Tasty recipe URL using the slug or ID
-        if (!sourceUrl) {
-          if (recipe.slug) {
-            sourceUrl = `https://tasty.co/recipe/${recipe.slug}`;
-          } else if (recipe.canonical_id) {
-            sourceUrl = `https://tasty.co/recipe/${recipe.canonical_id}`;
-          } else if (recipe.id) {
-            sourceUrl = `https://tasty.co/recipe/${recipe.id}`;
-          }
-        }
+        // Simple source URL
+        const sourceUrl = recipe.original_video_url || 
+                         recipe.beauty_url || 
+                         recipe.video_url ||
+                         `https://tasty.co/recipe/${recipe.slug || recipe.id}`;
 
         return {
           id: recipe.id,
-          title: recipe.name || 'Delicious Recipe',
+          title: recipe.name || recipe.title || 'Delicious Recipe',
           image: thumbnailUrl,
           readyInMinutes: totalTime,
-          difficulty: difficulty,
-          cuisineType: cuisineType,
           dietary: dietary,
           description: recipe.description ? 
             recipe.description.substring(0, 100) + '...' : 
             'A delicious recipe perfect for your next meal',
           sourceUrl: sourceUrl,
-          tastyId: recipe.id
+          tastyId: recipe.id,
+          ingredients: recipe.ingredients || [],
+          instructions: recipe.instructions || '',
+          pricePerServing: recipe.pricePerServing || null
         };
-      });
+      };
+
+      // Transform API data to match our format
+      const transformedRecipes = data.results.map(normalizeRecipe);
 
       // Shuffle the recipes for additional randomization
       const shuffledRecipes = [...transformedRecipes].sort(() => Math.random() - 0.5);
@@ -395,14 +375,7 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
     }
   };
 
-  const getDifficultyColor = (difficulty) => {
-    switch (difficulty.toLowerCase()) {
-      case 'easy': return '#4CAF50';
-      case 'medium': return '#FF9800';
-      case 'hard': return '#F44336';
-      default: return '#8B7355';
-    }
-  };
+
 
   const formatTime = (minutes) => {
     if (minutes < 60) {
@@ -415,121 +388,84 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
   };
 
   // Wishlist management functions
-  const addToWishlist = (recipe) => {
-    if (!isRecipeInWishlist(recipe.id)) {
-      setWishlist(prev => [...prev, recipe]);
-      // TODO: Save to AsyncStorage or database for persistence
+  const loadWishlistFromDB = async () => {
+    try {
+      const result = await getUserWishlist();
+      if (result.success) {
+        // Convert database items to recipe format
+        const recipes = result.wishlist.map(item => item.recipe_data);
+        setWishlist(recipes);
+        console.log('✅ Loaded wishlist from database:', recipes.length, 'items');
+      } else {
+        console.log('⚠️ Failed to load wishlist:', result.error);
+      }
+    } catch (error) {
+      console.error('❌ Error loading wishlist:', error);
     }
   };
 
-  const removeFromWishlist = (recipeId) => {
+  const addToWishlist = async (recipe) => {
+    if (isGuest) {
+      Alert.alert('Sign In Required', 'Please sign in to add recipes to your wishlist.');
+      return;
+    }
+
+    if (!isRecipeInWishlist(recipe.id)) {
+      // Optimistic update
+      setWishlist(prev => [...prev, recipe]);
+      
+      const result = await addToWishlistDB(recipe);
+      if (!result.success) {
+        // Revert on failure
+        setWishlist(prev => prev.filter(r => r.id !== recipe.id));
+        Alert.alert('Error', result.error || 'Failed to add to wishlist');
+      }
+    }
+  };
+
+  const removeFromWishlist = async (recipeId) => {
+    if (isGuest) return;
+
+    // Optimistic update
     setWishlist(prev => prev.filter(recipe => recipe.id !== recipeId));
-    // TODO: Remove from AsyncStorage or database
+    
+    const result = await removeFromWishlistDB(recipeId);
+    if (!result.success) {
+      // Revert on failure (would need to re-fetch to get the exact recipe back)
+      console.error('Failed to remove from wishlist:', result.error);
+      await loadWishlistFromDB(); // Reload to ensure consistency
+    }
   };
 
   const isRecipeInWishlist = (recipeId) => {
     return wishlist.some(recipe => recipe.id === recipeId);
   };
 
-  const toggleWishlist = (recipe) => {
+  const toggleWishlist = async (recipe) => {
     if (isRecipeInWishlist(recipe.id)) {
-      removeFromWishlist(recipe.id);
+      await removeFromWishlist(recipe.id);
     } else {
-      addToWishlist(recipe);
+      await addToWishlist(recipe);
+    }
+  };
+
+  const clearUserWishlist = async () => {
+    if (isGuest) return;
+
+    const result = await clearWishlistDB();
+    if (result.success) {
+      setWishlist([]);
+    } else {
+      Alert.alert('Error', result.error || 'Failed to clear wishlist');
     }
   };
 
   // Transform meals from API format to recipe format
   const transformMealsToRecipes = (meals) => {
-    return meals.map(recipe => {
-      // Extract cuisine type from tags
-      let cuisineType = 'international';
-      if (recipe.tags && recipe.tags.length > 0) {
-        const cuisineTag = recipe.tags.find(tag => 
-          ['italian', 'mexican', 'chinese', 'japanese', 'indian', 'thai', 'mediterranean', 'american', 'french', 'greek'].includes(tag.name?.toLowerCase())
-        );
-        if (cuisineTag) {
-          cuisineType = cuisineTag.name.toLowerCase();
-        }
-      }
-
-      // Extract dietary information from tags
-      const dietary = [];
-      if (recipe.tags) {
-        recipe.tags.forEach(tag => {
-          const tagName = tag.name?.toLowerCase();
-          if (tagName?.includes('vegetarian')) dietary.push('vegetarian');
-          if (tagName?.includes('vegan')) dietary.push('vegan');
-          if (tagName?.includes('gluten') && tagName?.includes('free')) dietary.push('gluten-free');
-          if (tagName?.includes('dairy') && tagName?.includes('free')) dietary.push('dairy-free');
-          if (tagName?.includes('keto')) dietary.push('keto');
-        });
-      }
-
-      // Determine cooking time with better fallback logic
-      let totalTime = recipe.total_time_minutes || recipe.cook_time_minutes || recipe.prep_time_minutes;
-      
-      if (!totalTime) {
-        const instructionCount = recipe.instructions?.length || 0;
-        const componentCount = recipe.sections?.length || 0;
-        
-        if (instructionCount <= 4 && componentCount <= 1) {
-          totalTime = Math.floor(Math.random() * 30) + 15;
-        } else if (instructionCount <= 8 && componentCount <= 2) {
-          totalTime = Math.floor(Math.random() * 45) + 30;
-        } else {
-          totalTime = Math.floor(Math.random() * 75) + 45;
-        }
-      }
-
-      if (totalTime > 120) {
-        totalTime = 120;
-      }
-
-      const instructionCount = recipe.instructions?.length || 0;
-      
-      let difficulty = 'Easy';
-      if (totalTime > 45 || instructionCount > 6) {
-        difficulty = 'Medium';
-      }
-      if (totalTime > 75 || instructionCount > 10) {
-        difficulty = 'Hard';
-      }
-
-      const thumbnailUrl = recipe.thumbnail_url || 
-                         (recipe.renditions && recipe.renditions.find(r => r.name === 'facebook')?.url) ||
-                         'https://images.unsplash.com/photo-1565299624946-b28f40a0ca4b?w=400&h=300&fit=crop';
-
-      let sourceUrl = recipe.original_video_url || 
-                     recipe.beauty_url || 
-                     recipe.video_url;
-      
-      if (!sourceUrl) {
-        if (recipe.slug) {
-          sourceUrl = `https://tasty.co/recipe/${recipe.slug}`;
-        } else if (recipe.canonical_id) {
-          sourceUrl = `https://tasty.co/recipe/${recipe.canonical_id}`;
-        } else if (recipe.id) {
-          sourceUrl = `https://tasty.co/recipe/${recipe.id}`;
-        }
-      }
-
-      return {
-        id: recipe.id,
-        title: recipe.name || 'Delicious Recipe',
-        image: thumbnailUrl,
-        readyInMinutes: totalTime,
-        difficulty: difficulty,
-        cuisineType: cuisineType,
-        dietary: dietary,
-        description: recipe.description ? 
-          recipe.description.substring(0, 100) + '...' : 
-          'A delicious recipe perfect for your next meal',
-        sourceUrl: sourceUrl,
-        tastyId: recipe.id
-      };
-    });
+    return meals.map(normalizeRecipe);
   };
+
+
 
   const getCurrentDate = () => {
     const today = new Date();
@@ -648,9 +584,11 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
                       <View style={styles.timeContainer}>
                         <Text style={styles.timeText}>{formatTime(recipe.readyInMinutes)}</Text>
                       </View>
-                      <View style={[styles.difficultyContainer, { backgroundColor: getDifficultyColor(recipe.difficulty) }]}>
-                        <Text style={styles.difficultyText}>{recipe.difficulty}</Text>
-                      </View>
+                      {recipe.pricePerServing && (
+                        <View style={styles.priceContainer}>
+                          <Text style={styles.priceText}>€{recipe.pricePerServing.toFixed(2)}</Text>
+                        </View>
+                      )}
                     </View>
                   </View>
                   
@@ -708,9 +646,11 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
                         <View style={styles.timeContainer}>
                           <Text style={styles.timeText}>{formatTime(recipe.readyInMinutes)}</Text>
                         </View>
-                        <View style={[styles.difficultyContainer, { backgroundColor: getDifficultyColor(recipe.difficulty) }]}>
-                          <Text style={styles.difficultyText}>{recipe.difficulty}</Text>
-                        </View>
+                        {recipe.pricePerServing && (
+                          <View style={styles.priceContainer}>
+                            <Text style={styles.priceText}>€{recipe.pricePerServing.toFixed(2)}</Text>
+                          </View>
+                        )}
                       </View>
                     </View>
                     
@@ -778,7 +718,7 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
                     { 
                       text: 'Clear', 
                       style: 'destructive',
-                      onPress: () => setWishlist([])
+                      onPress: () => clearUserWishlist()
                     }
                   ]
                 );
@@ -846,16 +786,12 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
                         <Text style={styles.metricLabel}>Cooking Time</Text>
                         <Text style={styles.metricValue}>{formatTime(selectedRecipe.readyInMinutes)}</Text>
                       </View>
-                      <View style={styles.modalMetricItem}>
-                        <Text style={styles.metricLabel}>Difficulty</Text>
-                        <Text style={[styles.metricValue, { color: getDifficultyColor(selectedRecipe.difficulty) }]}>
-                          {selectedRecipe.difficulty}
-                        </Text>
-                      </View>
-                      <View style={styles.modalMetricItem}>
-                        <Text style={styles.metricLabel}>Cuisine</Text>
-                        <Text style={styles.metricValue}>{selectedRecipe.cuisineType}</Text>
-                      </View>
+                      {selectedRecipe.pricePerServing && (
+                        <View style={styles.modalMetricItem}>
+                          <Text style={styles.metricLabel}>Price per Serving</Text>
+                          <Text style={styles.metricValue}>€{selectedRecipe.pricePerServing.toFixed(2)}</Text>
+                        </View>
+                      )}
                     </View>
 
                     {selectedRecipe.dietary && selectedRecipe.dietary.length > 0 && (
@@ -875,6 +811,26 @@ export default function IdeasScreen({ route, navigation, hideBottomNav }) {
                       <View style={styles.modalDescription}>
                         <Text style={styles.dietaryTitle}>Description</Text>
                         <Text style={styles.descriptionText}>{selectedRecipe.description}</Text>
+                      </View>
+                    )}
+
+                    {/* Ingredients Section */}
+                    {selectedRecipe.ingredients && selectedRecipe.ingredients.length > 0 && (
+                      <View style={styles.modalSection}>
+                        <Text style={styles.dietaryTitle}>Ingredients</Text>
+                        {selectedRecipe.ingredients.map((ingredient, index) => (
+                          <Text key={index} style={styles.ingredientText}>
+                            • {ingredient}
+                          </Text>
+                        ))}
+                      </View>
+                    )}
+
+                    {/* Instructions Section */}
+                    {selectedRecipe.instructions && selectedRecipe.instructions.length > 0 && (
+                      <View style={styles.modalSection}>
+                        <Text style={styles.dietaryTitle}>Instructions</Text>
+                        <Text style={styles.instructionsText}>{selectedRecipe.instructions}</Text>
                       </View>
                     )}
 
@@ -1039,18 +995,20 @@ const styles = StyleSheet.create({
     color: '#FEFEFE',
     letterSpacing: 0.1,
   },
-  difficultyContainer: {
+  priceContainer: {
+    backgroundColor: '#4CAF50',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 12,
   },
-  difficultyText: {
+  priceText: {
     fontFamily: 'Inter_500Medium',
     fontSize: 12,
     lineHeight: 16,
     color: '#FEFEFE',
     letterSpacing: 0.1,
   },
+
   recipeDescription: {
     fontFamily: 'Inter_400Regular',
     fontSize: 14,
@@ -1276,6 +1234,24 @@ const styles = StyleSheet.create({
     marginBottom: 26,
   },
   descriptionText: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 15,
+    lineHeight: 22,
+    color: '#6B6B6B',
+    letterSpacing: 0.1,
+  },
+  modalSection: {
+    marginBottom: 26,
+  },
+  ingredientText: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 15,
+    lineHeight: 22,
+    color: '#6B6B6B',
+    letterSpacing: 0.1,
+    marginBottom: 8,
+  },
+  instructionsText: {
     fontFamily: 'Inter_400Regular',
     fontSize: 15,
     lineHeight: 22,

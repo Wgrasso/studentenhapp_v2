@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, SafeAreaView, ScrollView, TouchableOpacity, Image, Modal, Animated, Alert, TextInput } from 'react-native';
 import { supabase } from '../lib/supabase';
-import { getUserGroups, createGroupInSupabase } from '../lib/groupsService';
+import { getUserGroups, createGroupInSupabase, getFavoriteGroupId } from '../lib/groupsService';
 import { saveDinnerRequest, getAllDinnerRequests, recordUserResponse, createMealFromRequest } from '../lib/dinnerRequestService';
 import DebugCleanupButton from './DebugCleanupButton';
 
@@ -170,7 +170,10 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
       }
 
       console.log('📥 Loading groups for user:', user.id);
-      const result = await getUserGroups(); // Note: getUserGroups doesn't need user.id parameter
+      const [result, favoriteId] = await Promise.all([
+        getUserGroups(),
+        getFavoriteGroupId()
+      ]);
       console.log('📝 Loaded groups result:', result);
       
       // getUserGroups returns { success: boolean, groups: array } or { success: false, error: string }
@@ -178,14 +181,14 @@ export default function MainProfileScreen({ route, navigation, hideBottomNav }) 
         console.log('✅ Setting groups:', result.groups.length, 'groups found');
         setUserGroups(result.groups);
 
-        // Find and select the main group if it exists
-        const mainGroup = result.groups.find(group => group.is_main_group);
-        if (mainGroup) {
-          console.log('🎯 Found main group, auto-selecting:', mainGroup.group_name);
-          setSelectedGroup(mainGroup);
+        // Find and select the favorite group if it exists
+        const favoriteGroup = result.groups.find(group => group.group_id === favoriteId);
+        if (favoriteGroup) {
+          console.log('⭐ Found favorite group, auto-selecting:', favoriteGroup.group_name);
+          setSelectedGroup(favoriteGroup);
         } else if (result.groups.length > 0) {
-          // If no main group but groups exist, select the first one
-          console.log('ℹ️ No main group found, selecting first group:', result.groups[0].group_name);
+          // If no favorite group but groups exist, select the first one
+          console.log('ℹ️ No favorite group found, selecting first group:', result.groups[0].group_name);
           setSelectedGroup(result.groups[0]);
         }
       } else {
